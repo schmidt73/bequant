@@ -146,7 +146,7 @@
       (->> (lazily-load-sensors reader)
            (map #(do
                    (when (= 0 (mod @counter 10000))
-                     (prn (str "Progress: " @counter)))
+                     (println (str "Progress: " @counter)))
                    (swap! counter inc)
                    %))
            (analyze-sensors lsh guides)))))
@@ -186,23 +186,23 @@
   (doseq [mbes-fastq mbes-merged-fastq-files]
     (with-open [reader (io/reader mbes-fastq)]
       (do
-        (print (str "Analyzing: " mbes-fastq))
+        (println (str "Analyzing: " mbes-fastq))
         (let [guides (load-guides-file mbes-guides-csv-file)
               lsh (load-lsh guides)
-              outcomes (analyze-fastq-file-with-progress mbes-fastq)
-              output-file (str (.getName mbes-fastq) "csv")]
-          (print (str "Writing outcomes to file: " mbes-fastq))
+              outcomes (analyze-fastq-file-with-progress lsh guides mbes-fastq)
+              output-file (str (.getName mbes-fastq) ".csv")]
+          (println (str "Writing outcomes to file: " mbes-fastq))
           (with-open [writer (io/writer output-file)]
             (pretty-print-outcomes-edit-pos outcomes writer))))))
   (doseq [hbes-fastq hbes-merged-fastq-files]
     (with-open [reader (io/reader hbes-fastq)]
       (do
-        (print (str "Analyzing: " hbes-fastq))
+        (println (str "Analyzing: " hbes-fastq "\n"))
         (let [guides (load-guides-file hbes-guides-csv-file)
               lsh (load-lsh guides)
-              outcomes (analyze-fastq-file-with-progress hbes-fastq)
-              output-file (str (.getName hbes-fastq) "csv")]
-          (print (str "Writing outcomes to file: " hbes-fastq))
+              outcomes (analyze-fastq-file-with-progress lsh guides hbes-fastq)
+              output-file (str (.getName hbes-fastq) ".csv")]
+          (println (str "Writing outcomes to file: " hbes-fastq))
           (with-open [writer (io/writer output-file)]
             (pretty-print-outcomes-edit-pos outcomes writer)))))))
             

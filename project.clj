@@ -4,5 +4,6 @@
   :dependencies [[org.clojure/clojure "1.10.1"]
                  [org.clojure/data.csv "1.0.0"]]
   :profiles {:uberjar {:aot :all}
-             :main be-analysis.core}
-  :repl-options {:init-ns be-analysis.core})
+             :prod {:main be-analysis.core
+                    :jar-name "analysis.jar-THIN"
+                    :uberjar-name "analysis.jar"}})
