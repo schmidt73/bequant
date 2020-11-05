@@ -2,7 +2,8 @@
   (:gen-class)
   (:require [clojure.string :as string]
             [clojure.data.csv :as csv]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [cheshire.core :as chesire])
   (:import java.security.MessageDigest))
 
 ;;; LSH code
@@ -131,13 +132,28 @@
           line (string/join "," [guide-id sequence c-to-a c-to-t c-to-g total])]
      (.append writer (str line "\n")))))
 
+(defn jsonify-outcomes
+  [outcomes]
+  (into {}
+    (map (fn [[guide outcomes]]
+           [(:guide-id guide)
+            {:total (:total outcomes)
+             :outcomes (->> (map (fn [[k v]] (if (map? k) (assoc k :count v))) outcomes)
+                            (filter identity))}])
+     outcomes)))
+
+(defn pretty-print-outcomes-json
+  [outcomes writer]
+  (-> (jsonify-outcomes outcomes)
+      (chesire/generate-stream writer)))
+
 ;;;; Code that actually does data analysis
 
 ;; (let [guides (load-guides-file hbes-guides-csv-file)
 ;;       lsh (load-lsh guides)]
-;;   (pretty-print-outcomes-edit-pos
-;;    (analyze-fastq-file-with-progress lsh guides (first hbes-merged-fastq-files))
-;;    *out*))
+;;   (->> (first hbes-merged-fastq-files)
+;;        (analyze-fastq-file-with-progress lsh guides)
+;;        (pretty-print-outcomes-json *out*)))
 
 (defn analyze-fastq-file-with-progress
   [lsh guides fastq-file]
@@ -149,6 +165,7 @@
                      (println (str "Progress: " @counter)))
                    (swap! counter inc)
                    %))
+           (take 100)
            (analyze-sensors lsh guides)))))
 
 (def parent-dir
@@ -190,10 +207,10 @@
         (let [guides (load-guides-file mbes-guides-csv-file)
               lsh (load-lsh guides)
               outcomes (analyze-fastq-file-with-progress lsh guides mbes-fastq)
-              output-file (str (.getName mbes-fastq) ".csv")]
+              output-file (str (.getName mbes-fastq) ".json")]
           (println (str "Writing outcomes to file: " mbes-fastq))
           (with-open [writer (io/writer output-file)]
-            (pretty-print-outcomes-edit-pos outcomes writer))))))
+            (pretty-print-outcomes-json outcomes writer))))))
   (doseq [hbes-fastq hbes-merged-fastq-files]
     (with-open [reader (io/reader hbes-fastq)]
       (do
@@ -201,9 +218,9 @@
         (let [guides (load-guides-file hbes-guides-csv-file)
               lsh (load-lsh guides)
               outcomes (analyze-fastq-file-with-progress lsh guides hbes-fastq)
-              output-file (str (.getName hbes-fastq) ".csv")]
+              output-file (str (.getName hbes-fastq) ".json")]
           (println (str "Writing outcomes to file: " hbes-fastq))
           (with-open [writer (io/writer output-file)]
-            (pretty-print-outcomes-edit-pos outcomes writer)))))))
+            (pretty-print-outcomes-json outcomes writer)))))))
             
       
