@@ -165,7 +165,6 @@
                      (println (str "Progress: " @counter)))
                    (swap! counter inc)
                    %))
-           (take 100)
            (analyze-sensors lsh guides)))))
 
 (def parent-dir
@@ -222,5 +221,3 @@
           (println (str "Writing outcomes to file: " hbes-fastq))
           (with-open [writer (io/writer output-file)]
             (pretty-print-outcomes-json outcomes writer)))))))
-            
-      
