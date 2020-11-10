@@ -3,61 +3,18 @@
   (:require [clojure.string :as string]
             [clojure.data.csv :as csv]
             [clojure.java.io :as io]
-            [cheshire.core :as chesire])
-  (:import java.security.MessageDigest))
-
-;;; LSH code
-
-(defn hamming-distance
-  [s1 s2]
-  (count (filter not (map = s1 s2))))
-
-(defn hash-func
-  "Returns a hash function that uses CRC-32 over the sampled bits to
-  compute a hash."
-  [bits-to-sample]
-  (fn [msg]
-    (let [crc (new java.util.zip.CRC32)]
-      (doseq [n bits-to-sample]
-        (.update crc (int (nth msg n))))
-      (.getValue crc))))
-
-(defn create-lsh-structure
-  "Creates an LSH structure for NN search with l hash
-  functions that sample k bits in d dimensions."
-  [l k d strings]
-  (let [create-hash-func (fn [] (hash-func (take k (repeatedly #(rand-int d)))))
-        hash-funcs (vec (take l (repeatedly create-hash-func)))
-        create-table (fn [hash-func] (into {} (map #(vector (hash-func %1) %2) strings strings)))
-        hash-tables (mapv create-table hash-funcs)]
-    {:hash-funcs hash-funcs
-     :hash-tables hash-tables}))
-
-(defn search-lsh
-  [lsh idx string]
-  (let [hash-func (nth (:hash-funcs lsh) idx)
-        hash-table (nth (:hash-tables lsh) idx)]
-    (if-let [match (get hash-table (hash-func string))]
-      {:distance (hamming-distance match string)
-       :match match})))
-
-(defn find-approx-nearest-neighbor
-  [lsh string r]
-  (->> (map #(search-lsh lsh % string) (range (count (:hash-funcs lsh))))
-       (filter identity)
-       (some #(if (<= (:distance %) r) %))))
+            [cheshire.core :as chesire]))
 
 ;;;; Data loading code 
 
-(def lscaffold "AAAAAGTGGCACCGAGTCGGTGCTTTTTTT")
-(def rscaffold "GAATTC")
-
 (defn get-sensor
   [s]
-  (if-let [lindex (string/last-index-of s lscaffold)]
-    (if-let [rindex (string/last-index-of s rscaffold)]
-      (if (< lindex rindex) 
-        (subs s (+ lindex (count lscaffold)) rindex)))))
+  (let [lscaffold "AAAAAGTGGCACCGAGTCGGTGCTTTTTTT"
+        rscaffold "GAATTC"]
+    (if-let [lindex (string/last-index-of s lscaffold)]
+      (if-let [rindex (string/last-index-of s rscaffold)]
+        (if (< lindex rindex) 
+          (subs s (+ lindex (count lscaffold)) rindex))))))
 
 (defn lazily-load-sensors
   [rdr]
@@ -72,14 +29,15 @@
   [row]
   (let [edit-pos (Integer/parseInt (nth row 18))
         target (subs (nth row 13) 135 175)]
-    {:guide-id (nth row 7)
+    {:sg-rna (nth row 12)
+     :guide-id (nth row 7)
      :target target
      :edit-pos edit-pos}))
 
 (defn lazily-load-guides
   [rdr]
   (->> (rest (csv/read-csv rdr))
-    (map load-guide-csv-row)))
+       (map load-guide-csv-row)))
 
 ;;;; Data analysis code
 
@@ -88,7 +46,7 @@
   (->> (map #(if (not= %1 %2) {:from %1 :to %2}) (:target guide) sensor)
        (map-indexed #(if %2 (assoc %2 :position %1)))
        (filter identity)))
-  
+
 (defn count-outcomes
   [guide-sensor-seq]
   (reduce
@@ -103,17 +61,6 @@
         outcomes)))
    {}
    guide-sensor-seq))
-
-(defn analyze-sensors
-  "Analyzes a set of sensors, returning a map from the guides
-  to the number of edits in each position."
-  [lsh guides sensors]
-  (let [targets-to-guides (into {} (map #(vector (:target %) %)) guides)]
-     (->> sensors
-          (pmap #(vector % (find-approx-nearest-neighbor lsh % 3)))
-          (filter second)
-          (pmap #(vector (get targets-to-guides (:match (second %))) (first %)))
-          (count-outcomes))))
 
 ;;;; Pretty printing code
 
@@ -130,17 +77,16 @@
           c-to-t (get outcome {:from \C :to \T :position edit-pos} 0)
           c-to-g (get outcome {:from \C :to \G :position edit-pos} 0)
           line (string/join "," [guide-id sequence c-to-a c-to-t c-to-g total])]
-     (.append writer (str line "\n")))))
+      (.append writer (str line "\n")))))
 
 (defn jsonify-outcomes
   [outcomes]
-  (into {}
-    (map (fn [[guide outcomes]]
-           [(:guide-id guide)
-            {:total (:total outcomes)
-             :outcomes (->> (map (fn [[k v]] (if (map? k) (assoc k :count v))) outcomes)
-                            (filter identity))}])
-     outcomes)))
+  (map (fn [[guide outcomes]]
+         [guide
+          {:total (:total outcomes)
+           :outcomes (->> (map (fn [[k v]] (if (map? k) (assoc k :count v))) outcomes)
+                          (filter identity))}])
+       outcomes))
 
 (defn pretty-print-outcomes-json
   [outcomes writer]
@@ -149,11 +95,80 @@
 
 ;;;; Code that actually does data analysis
 
-;; (let [guides (load-guides-file hbes-guides-csv-file)
-;;       lsh (load-lsh guides)]
-;;   (->> (first hbes-merged-fastq-files)
-;;        (analyze-fastq-file-with-progress lsh guides)
-;;        (pretty-print-outcomes-json *out*)))
+(defn report-count-filter [msg f coll]
+  (let [result (filter f coll)]
+    (println (str msg (count result)))
+    result))
+
+;; (if-let [lindex (string/last-index-of s lscaffold)]
+;;   (if-let [rindex (string/last-index-of s rscaffold)]
+;;     (if (< lindex rindex) 
+;;       (subs s (+ lindex (count lscaffold)) rindex)))))
+
+(defn get-sg-rna
+  [s]
+  (let [lscaffold "CACC"
+        rscaffold "GTTTAAG"]
+    (if-let [lindex (string/index-of s lscaffold)]
+      (if-let [rindex (string/index-of s rscaffold)]
+        (if (< lindex rindex)
+          (subs s (+ lindex (count lscaffold)) rindex))))))
+
+(defn count-statistics-sensor-nn-matching
+  [guides fastq-file]
+  "Counts various statistics for a read file."
+  (let [sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))
+        lsh (load-lsh guides)]
+    (with-open [reader (io/reader fastq-file)]
+      (->> (line-seq reader)
+           (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
+           (report-count-filter "# reads: " identity)
+           (map get-sensor)
+           (report-count-filter "# reads with sensors: " some?)
+           (report-count-filter "# reads with length 40 sensors: "
+                                #(= 40 (count %)))
+           (pmap #(find-approx-nearest-neighbor lsh % 3))
+           (report-count-filter "# reads with length 40 sensors and matched guides: "
+                                some?)
+           (doall)))))
+
+(defn count-statistics-sgrna-matching
+  [guides fastq-file]
+  "Counts various statistics for a read file."
+  (let [sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))
+        lsh (load-lsh guides)]
+    (with-open [reader (io/reader fastq-file)]
+      (->> (line-seq reader)
+           (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
+           (report-count-filter "# reads: " identity)
+           (map #(vector (get sg-rna-to-guide (get-sg-rna %))
+                         (get-sensor %)))
+           (report-count-filter "# reads with sensors: "
+                                (fn [[_ sensor]] (some? sensor)))
+           (report-count-filter "# reads with length 40 sensors: "
+                                (fn [[_ sensor]] (= 40 (count sensor))))
+           (report-count-filter "# reads with length 40 sensors and matched guides: "
+                                (fn [[guides _]] (some? guides)))
+           (doall)))))
+
+(defn analyze-fastq-file-with-progress-exact-sgrna
+  [guides fastq-file]
+  (let [counter (atom 0)
+        sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))]
+    (with-open [reader (io/reader fastq-file)]
+      (->> (line-seq reader)
+           (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
+           (filter identity)
+           (map #(vector (get sg-rna-to-guide (get-sg-rna %))
+                         (get-sensor %)))
+           (filter #(and (some? (first %)) (some? (second %))))
+           (filter #(= 40 (count (second %))))
+           (map #(do
+                   (when (= 0 (mod @counter 10000))
+                     (println (str "Progress: " @counter)))
+                   (swap! counter inc)
+                   %))
+           (count-outcomes)))))
 
 (defn analyze-fastq-file-with-progress
   [lsh guides fastq-file]
@@ -198,16 +213,17 @@
   [guides]
   (create-lsh-structure 25 10 40 (map :target guides))) 
 
+(-main)
+
 (defn -main [& args]
   (doseq [mbes-fastq mbes-merged-fastq-files]
     (with-open [reader (io/reader mbes-fastq)]
       (do
         (println (str "Analyzing: " mbes-fastq))
         (let [guides (load-guides-file mbes-guides-csv-file)
-              lsh (load-lsh guides)
-              outcomes (analyze-fastq-file-with-progress lsh guides mbes-fastq)
+              outcomes (analyze-fastq-file-with-progress-exact-sgrna guides mbes-fastq)
               output-file (str (.getName mbes-fastq) ".json")]
-          (println (str "Writing outcomes to file: " mbes-fastq))
+          (println (str "Writing outcomes to file: " output-file))
           (with-open [writer (io/writer output-file)]
             (pretty-print-outcomes-json outcomes writer))))))
   (doseq [hbes-fastq hbes-merged-fastq-files]
@@ -215,9 +231,8 @@
       (do
         (println (str "Analyzing: " hbes-fastq "\n"))
         (let [guides (load-guides-file hbes-guides-csv-file)
-              lsh (load-lsh guides)
-              outcomes (analyze-fastq-file-with-progress lsh guides hbes-fastq)
+              outcomes (analyze-fastq-file-with-progress-exact-sgrna guides hbes-fastq)
               output-file (str (.getName hbes-fastq) ".json")]
-          (println (str "Writing outcomes to file: " hbes-fastq))
+          (println (str "Writing outcomes to file: " output-file))
           (with-open [writer (io/writer output-file)]
             (pretty-print-outcomes-json outcomes writer)))))))
