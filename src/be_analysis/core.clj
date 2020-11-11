@@ -16,6 +16,15 @@
         (if (< lindex rindex) 
           (subs s (+ lindex (count lscaffold)) rindex))))))
 
+(defn get-sg-rna
+  [s]
+  (let [lscaffold "CACC"
+        rscaffold "GTTTAAGAGCTATGCTGGAAACAGCATAGCAAGTTTAAATAAGGCTAGTCCGTTATCAACTTGAAAAAGTGGCACCGAGTCGGTGCTTTTTTT"]
+    (if-let [lindex (string/index-of s lscaffold)]
+      (if-let [rindex (string/index-of s rscaffold)]
+        (if (< lindex rindex)
+          (subs s (+ lindex (count lscaffold)) rindex))))))
+
 (defn lazily-load-sensors
   [rdr]
   (->> (line-seq rdr)
@@ -29,7 +38,7 @@
   [row]
   (let [edit-pos (Integer/parseInt (nth row 18))
         target (subs (nth row 13) 135 175)]
-    {:sg-rna (nth row 12)
+    {:sg-rna (nth row 11) ; 12 for HBES 11 for MBES
      :guide-id (nth row 7)
      :target target
      :edit-pos edit-pos}))
@@ -43,9 +52,12 @@
 
 (defn get-outcomes
   [guide sensor]
-  (->> (map #(if (not= %1 %2) {:from %1 :to %2}) (:target guide) sensor)
-       (map-indexed #(if %2 (assoc %2 :position %1)))
-       (filter identity)))
+  (if (= 40 (count sensor))
+    (->> (map #(if (not= %1 %2) {:from %1 :to %2}) (:target guide) sensor)
+         (map-indexed #(if %2 (assoc %2 :position %1)))
+         (filter identity)
+         (#(conj %2 %1) :edits))
+    [:indels {:type :indel :size (- (count sensor) 40)}]))
 
 (defn count-outcomes
   [guide-sensor-seq]
@@ -57,33 +69,59 @@
         (fn [counts outcome]
           (let [old-count (get-in outcomes-map [guide outcome] 0)]
             (assoc-in counts [guide outcome] (inc old-count))))
-        (assoc-in outcomes-map [guide :total] (inc total-count))
+        outcomes-map
         outcomes)))
    {}
    guide-sensor-seq))
 
 ;;;; Pretty printing code
 
-(defn pretty-print-outcomes-edit-pos
-  [outcomes writer]
-  (.append writer "Guide ID,Sequence,C-to-A,C-to-T,C-to-G,Total\n")
-  (doseq [guide (keys outcomes)]
-    (let [outcome (get outcomes guide)
-          guide-id (:guide-id guide)
-          edit-pos (+ (:edit-pos guide) 9)
-          total (:total outcome 0)
-          sequence (:target guide)
-          c-to-a (get outcome {:from \C :to \A :position edit-pos} 0)
-          c-to-t (get outcome {:from \C :to \T :position edit-pos} 0)
-          c-to-g (get outcome {:from \C :to \G :position edit-pos} 0)
-          line (string/join "," [guide-id sequence c-to-a c-to-t c-to-g total])]
-      (.append writer (str line "\n")))))
+(defn pretty-print-row
+  [guide outcome-rep1 outcome-rep2 writer]
+  (let [guide-id (:guide-id guide)
+        edit-pos (+ (:edit-pos guide) 9)
+        sequence (:target guide)
+        total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0))
+        percent-rep1 #(float (if (= total-rep1 0) 0 (* 100 (/ % total-rep1))))
+        c-to-a-rep1 (get outcome-rep1 {:from \C :to \A :position edit-pos} 0)
+        c-to-t-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos} 0)
+        c-to-g-rep1 (get outcome-rep1 {:from \C :to \G :position edit-pos} 0)
+        indels-rep1 (get outcome-rep1 :indels 0)
+        total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0))
+        percent-rep2 #(float (if (= total-rep2 0) 0 (* 100 (/ % total-rep2))))
+        c-to-a-rep2 (get outcome-rep2 {:from \C :to \A :position edit-pos} 0)
+        c-to-t-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos} 0)
+        c-to-g-rep2 (get outcome-rep2 {:from \C :to \G :position edit-pos} 0)
+        indels-rep2 (get outcome-rep2 :indels 0)
+        line (string/join "," [guide-id total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1
+                               indels-rep1 total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2
+                               indels-rep2 (percent-rep1 c-to-t-rep1) (percent-rep1 c-to-a-rep1)
+                               (percent-rep1 c-to-g-rep1) (percent-rep1 indels-rep1)
+                               (percent-rep2 c-to-t-rep2) (percent-rep2 c-to-a-rep2)
+                               (percent-rep2 c-to-g-rep2) (percent-rep2 indels-rep2)])]
+    (.append writer (str line "\n"))))
+
+(defn pretty-print-outcomes-csv
+  [outcomes-rep1 outcomes-rep2 writer]
+  (let [header (str "guide_ID,total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,"
+                    "indel_REP1,total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,"
+                    "indel_REP2,percent_tCTN_REP1,percent_tCAN_REP1,"
+                    "percent_tCGN_REP1,percent_indel_REP1,"
+                    "percent_tCTN_REP2,percent_tCAN_REP2,percent_tCGN_REP2,"
+                    "percent_indel_REP2,percent_tCTN,percent_tCAN,percent_tCGN,"
+                    "percent_indel")]
+    (.append writer (str header "\n"))
+    (doseq [guide (keys outcomes-rep1)]
+      (let [outcome-rep1 (get outcomes-rep1 guide)
+            outcome-rep2 (get outcomes-rep2 guide)]
+        (pretty-print-row guide outcome-rep1 outcome-rep2 writer)))))
 
 (defn jsonify-outcomes
   [outcomes]
   (map (fn [[guide outcomes]]
          [guide
-          {:total (:total outcomes)
+          {:total (+ (get outcomes :edits 0) (get outcomes :indels 0))
+           :indels (get outcomes :indels 0)
            :outcomes (->> (map (fn [[k v]] (if (map? k) (assoc k :count v))) outcomes)
                           (filter identity))}])
        outcomes))
@@ -95,63 +133,7 @@
 
 ;;;; Code that actually does data analysis
 
-(defn report-count-filter [msg f coll]
-  (let [result (filter f coll)]
-    (println (str msg (count result)))
-    result))
-
-;; (if-let [lindex (string/last-index-of s lscaffold)]
-;;   (if-let [rindex (string/last-index-of s rscaffold)]
-;;     (if (< lindex rindex) 
-;;       (subs s (+ lindex (count lscaffold)) rindex)))))
-
-(defn get-sg-rna
-  [s]
-  (let [lscaffold "CACC"
-        rscaffold "GTTTAAG"]
-    (if-let [lindex (string/index-of s lscaffold)]
-      (if-let [rindex (string/index-of s rscaffold)]
-        (if (< lindex rindex)
-          (subs s (+ lindex (count lscaffold)) rindex))))))
-
-(defn count-statistics-sensor-nn-matching
-  [guides fastq-file]
-  "Counts various statistics for a read file."
-  (let [sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))
-        lsh (load-lsh guides)]
-    (with-open [reader (io/reader fastq-file)]
-      (->> (line-seq reader)
-           (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
-           (report-count-filter "# reads: " identity)
-           (map get-sensor)
-           (report-count-filter "# reads with sensors: " some?)
-           (report-count-filter "# reads with length 40 sensors: "
-                                #(= 40 (count %)))
-           (pmap #(find-approx-nearest-neighbor lsh % 3))
-           (report-count-filter "# reads with length 40 sensors and matched guides: "
-                                some?)
-           (doall)))))
-
-(defn count-statistics-sgrna-matching
-  [guides fastq-file]
-  "Counts various statistics for a read file."
-  (let [sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))
-        lsh (load-lsh guides)]
-    (with-open [reader (io/reader fastq-file)]
-      (->> (line-seq reader)
-           (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
-           (report-count-filter "# reads: " identity)
-           (map #(vector (get sg-rna-to-guide (get-sg-rna %))
-                         (get-sensor %)))
-           (report-count-filter "# reads with sensors: "
-                                (fn [[_ sensor]] (some? sensor)))
-           (report-count-filter "# reads with length 40 sensors: "
-                                (fn [[_ sensor]] (= 40 (count sensor))))
-           (report-count-filter "# reads with length 40 sensors and matched guides: "
-                                (fn [[guides _]] (some? guides)))
-           (doall)))))
-
-(defn analyze-fastq-file-with-progress-exact-sgrna
+(defn analyze-fastq-file-with-progress
   [guides fastq-file]
   (let [counter (atom 0)
         sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))]
@@ -162,7 +144,6 @@
            (map #(vector (get sg-rna-to-guide (get-sg-rna %))
                          (get-sensor %)))
            (filter #(and (some? (first %)) (some? (second %))))
-           (filter #(= 40 (count (second %))))
            (map #(do
                    (when (= 0 (mod @counter 10000))
                      (println (str "Progress: " @counter)))
@@ -170,17 +151,16 @@
                    %))
            (count-outcomes)))))
 
-(defn analyze-fastq-file-with-progress
-  [lsh guides fastq-file]
-  (let [counter (atom 0)]
-    (with-open [reader (io/reader fastq-file)]
-      (->> (lazily-load-sensors reader)
-           (map #(do
-                   (when (= 0 (mod @counter 10000))
-                     (println (str "Progress: " @counter)))
-                   (swap! counter inc)
-                   %))
-           (analyze-sensors lsh guides)))))
+(doseq [base-editor (keys mbes-merged-fastq-files)]
+  (let [reps (get mbes-merged-fastq-files base-editor)
+        rep1 (first (filter #(re-find #"REP1" (.getName %)) reps))
+        rep2 (first (filter #(re-find #"REP2" (.getName %)) reps))
+        guides (load-guides-file mbes-guides-csv-file)
+        outcomes-rep1 (analyze-fastq-file-with-progress guides rep1)
+        outcomes-rep2 (analyze-fastq-file-with-progress guides rep2)
+        output-file (str (.getName rep1) ".csv")]
+    (with-open [writer (io/writer output-file)]
+      (pretty-print-outcomes-csv outcomes-rep1 outcomes-rep2 writer))))
 
 (def parent-dir
   "/home/schmidt73/Desktop/base-editing/")
@@ -189,13 +169,15 @@
   (->> (io/file (str parent-dir "/mdamb231-fastq/merged/"))
        (file-seq)
        (filter #(.isFile %))
-       (filter #(re-find #"HBES" (.getName %)))))
-
+       (filter #(re-find #"HBES" (.getName %)))
+       (group-by #(second (re-find #"HBES_(.*)_REP" (.getName %))))))
+       
 (def mbes-merged-fastq-files
   (->> (io/file (str parent-dir "/mdamb231-fastq/merged/"))
        (file-seq)
        (filter #(.isFile %))
-       (filter #(re-find #"MBES" (.getName %)))))
+       (filter #(re-find #"MBES" (.getName %)))
+       (group-by #(second (re-find #"MBES_(.*)_REP" (.getName %))))))
 
 (def hbes-guides-csv-file
   (str parent-dir "/mdamb231-fastq/HBESv4_revised_whitelist.csv"))
@@ -212,8 +194,6 @@
 (defn load-lsh
   [guides]
   (create-lsh-structure 25 10 40 (map :target guides))) 
-
-(-main)
 
 (defn -main [& args]
   (doseq [mbes-fastq mbes-merged-fastq-files]
