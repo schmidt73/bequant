@@ -3,11 +3,9 @@
   (:require [clojure.string :as string]
             [clojure.data.csv :as csv]
             [clojure.java.io :as io]
-            [cheshire.core :as chesire]))
-
-(defn hamming-distance
-  [s1 s2]
-  (count (filter not (map = s1 s2))))
+            [taoensso.timbre :as timbre]
+            [cheshire.core :as chesire]
+            [clojure.tools.cli :refer [parse-opts]]))
 
 ;;;; Data loading code 
 
@@ -42,7 +40,7 @@
   [row]
   (let [edit-pos (Integer/parseInt (nth row 18))
         target (subs (nth row 13) 135 175)]
-    {:sg-rna (nth row 11) ; 12 for HBES 11 for MBES
+    {:sg-rna (nth row 11)
      :guide-id (nth row 7)
      :target target
      :pam (nth row 16)
@@ -52,7 +50,7 @@
   [row]
   (let [edit-pos (Integer/parseInt (nth row 18))
         target (subs (nth row 13) 135 175)]
-    {:sg-rna (nth row 12) ; 12 for HBES 11 for MBES
+    {:sg-rna (nth row 12)
      :guide-id (nth row 7)
      :target target
      :pam (nth row 15)
@@ -63,23 +61,47 @@
   (->> (rest (csv/read-csv rdr))
        (map row-reader)))
 
+(defn load-mbes-guides-file
+  [guides-csv-file]
+  (with-open [rdr (io/reader guides-csv-file)]
+    (->> (lazily-load-guides rdr load-guide-csv-mbes-row)
+         (vec))))
+
+(defn load-hbes-guides-file
+  [guides-csv-file]
+  (with-open [rdr (io/reader guides-csv-file)]
+    (->> (lazily-load-guides rdr load-guide-csv-hbes-row)
+         (vec))))
+
 ;;;; Data analysis code
+
+(defn hamming-distance
+  [s1 s2]
+  (count (filter not (map = s1 s2))))
 
 (defn get-outcomes
   [guide sensor]
-  (if (= 40 (count sensor))
+  (cond
+    (not= 40 (count sensor))
+    [:indels]
+
+    (= 0 (hamming-distance (:target guide) sensor))
+    [:non-edits]
+
+    (not= 0 (hamming-distance (subs sensor 0 5) (subs (:target guide) 0 5)))
+    [:guide-sensor-mismatches]
+
+    :otherwise
     (->> (map #(if (not= %1 %2) {:from %1 :to %2}) (:target guide) sensor)
          (map-indexed #(if %2 (assoc %2 :position %1)))
          (filter identity)
-         (#(conj %2 %1) :edits {:type :edit :distance (hamming-distance guide sensor)}))
-    [:indels {:type :indel :size (- (count sensor) 40)}]))
+         (concat [:edits]))))
 
 (defn count-outcomes
   [guide-sensor-seq]
   (reduce
    (fn [outcomes-map [guide sensor]]
-     (let [outcomes (get-outcomes guide sensor)
-           total-count (get-in outcomes-map [guide :total] 0)]
+     (let [outcomes (get-outcomes guide sensor)]
        (reduce
         (fn [counts outcome]
           (let [old-count (get-in outcomes-map [guide outcome] 0)]
@@ -96,13 +118,15 @@
   (let [guide-id (:guide-id guide)
         edit-pos (+ (:edit-pos guide) 9)
         sequence (:target guide)
-        total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0))
+        total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0)
+                       (get outcome-rep1 :non-edits 0))
         percent-rep1 #(float (if (= total-rep1 0) 0 (* 100 (/ % total-rep1))))
         c-to-a-rep1 (get outcome-rep1 {:from \C :to \A :position edit-pos} 0)
         c-to-t-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos} 0)
         c-to-g-rep1 (get outcome-rep1 {:from \C :to \G :position edit-pos} 0)
         indels-rep1 (get outcome-rep1 :indels 0)
-        total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0))
+        total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0)
+                       (get outcome-rep2 :non-edits 0))
         percent-rep2 #(float (if (= total-rep2 0) 0 (* 100 (/ % total-rep2))))
         c-to-a-rep2 (get outcome-rep2 {:from \C :to \A :position edit-pos} 0)
         c-to-t-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos} 0)
@@ -206,79 +230,76 @@
            (filter #(and (some? (first %)) (some? (second %))))
            (map #(do
                    (when (= 0 (mod @counter 10000))
-                     (println (str "Progress: " @counter)))
+                     (timbre/info (str "FASTq Records Processed: " @counter)))
                    (swap! counter inc)
                    %))
            (count-outcomes)))))
 
-(doseq [base-editor (keys hbes-merged-fastq-files)]
-  (let [reps (get hbes-merged-fastq-files base-editor)
-        rep1 (first (filter #(re-find #"REP1" (.getName %)) reps))
-        rep2 (first (filter #(re-find #"REP2" (.getName %)) reps))
-        guides (load-hbes-guides-file hbes-guides-csv-file)
-        outcomes-rep1 (analyze-fastq-file-with-progress guides rep1)
-        outcomes-rep2 (analyze-fastq-file-with-progress guides rep2)
-        output-file (str (.getName rep1) ".csv")]
+(def guides-map
+  {:mbes (load-mbes-guides-file (io/resource "MBESv4_revised_whitelist.csv"))
+   :hbes (load-hbes-guides-file (io/resource "HBESv4_revised_whitelist.csv"))})
+
+(defn process-fastqs-edit-position
+  [output-file rep1 rep2 screen-type format]
+  (let [guides (screen-type guides-map)
+        outcomes-rep1 (do (timbre/info "Processing FASTq file:" rep1)
+                          (analyze-fastq-file-with-progress guides rep1))
+        outcomes-rep2 (do (timbre/info "Processing FASTq file:" rep2)
+                          (analyze-fastq-file-with-progress guides rep2))]
     (with-open [writer (io/writer output-file)]
-      (pretty-print-outcomes-edit-pos-csv outcomes-rep1 outcomes-rep2 writer))))
+      (case format
+        :target (pretty-print-outcomes-csv outcomes-rep1 outcomes-rep2 writer)
+        :all (pretty-print-outcomes-edit-pos-csv outcomes-rep1 outcomes-rep2 writer)))))
+  
+;;;; CLI 
 
-(def parent-dir
-  "/home/schmidt73/Desktop/base-editing/")
+(def cli-options
+  [["-o" "--output FILE" "Output file (REQUIRED)."]
+   ["-s" "--screen SCREEN" "Screen to pull whitelist for"
+    :default :mbes
+    :default-desc "MBES"
+    :parse-fn #(keyword (string/lower-case %))
+    :validate [#{:mbes :hbes} "must be one of ['MBES', 'HBES']"]]
+   ["-f" "--format OUTPUT_FORMAT" "Output either only target cytosine or all cytosines."
+    :default :target
+    :default-desc "TARGET"
+    :parse-fn #(keyword (string/lower-case %))
+    :validate [#{:target :all} "must be one of ['TARGET', 'ALL']"]]
+   ["-h" "--help"]])
 
-(def hbes-merged-fastq-files
-  (->> (io/file (str parent-dir "/mdamb231-fastq/merged/"))
-       (file-seq)
-       (filter #(.isFile %))
-       (filter #(re-find #"HBES" (.getName %)))
-       (group-by #(second (re-find #"HBES_(.*)_REP" (.getName %))))))
-       
-(def mbes-merged-fastq-files
-  (->> (io/file (str parent-dir "/mdamb231-fastq/merged/"))
-       (file-seq)
-       (filter #(.isFile %))
-       (filter #(re-find #"MBES" (.getName %)))
-       (group-by #(second (re-find #"MBES_(.*)_REP" (.getName %))))))
+(defn usage [options-summary]
+  (->> ["Usage: java -jar analyze-fastqs rep1 rep2 [options]"
+        ""
+        "Options:"
+        options-summary
+        ""
+        "Expects FASTq files consisting of the paired end reads"
+        "for each replicate."]
+       (string/join \newline)))
 
-(def hbes-guides-csv-file
-  (str parent-dir "/mdamb231-fastq/HBESv4_revised_whitelist.csv"))
+(defn error-msg [errors]
+  (str "The following errors occurred while parsing your command:\n\n"
+       (string/join \newline errors)))
 
-(def mbes-guides-csv-file
-  (str parent-dir "/mdamb231-fastq/MBESv4_revised_whitelist.csv"))
+(defn validate-args
+  [args]
+  (let [{:keys [options arguments summary errors]} (parse-opts args cli-options)]
+    (cond
+      (:help options) {:exit-message (usage summary) :ok? true}
+      errors          {:exit-message (error-msg errors)}
 
-(defn load-mbes-guides-file
-  [guides-csv-file]
-  (with-open [rdr (io/reader guides-csv-file)]
-    (->> (lazily-load-guides rdr load-guide-csv-mbes-row)
-         (vec))))
+      (and (= 2 (count arguments)) (:output options))
+      {:action [(:output options) (first arguments) (second arguments)
+                (:screen options) (:format options)]}
 
-(defn load-hbes-guides-file
-  [guides-csv-file]
-  (with-open [rdr (io/reader guides-csv-file)]
-    (->> (lazily-load-guides rdr load-guide-csv-hbes-row)
-         (vec))))
+      :else {:exit-message (usage summary)})))
 
-(defn load-lsh
-  [guides]
-  (create-lsh-structure 25 10 40 (map :target guides))) 
+(defn exit [status msg]
+  (println msg)
+  (System/exit status)) 
 
 (defn -main [& args]
-  (doseq [mbes-fastq mbes-merged-fastq-files]
-    (with-open [reader (io/reader mbes-fastq)]
-      (do
-        (println (str "Analyzing: " mbes-fastq))
-        (let [guides (load-guides-file mbes-guides-csv-file)
-              outcomes (analyze-fastq-file-with-progress-exact-sgrna guides mbes-fastq)
-              output-file (str (.getName mbes-fastq) ".json")]
-          (println (str "Writing outcomes to file: " output-file))
-          (with-open [writer (io/writer output-file)]
-            (pretty-print-outcomes-json outcomes writer))))))
-  (doseq [hbes-fastq hbes-merged-fastq-files]
-    (with-open [reader (io/reader hbes-fastq)]
-      (do
-        (println (str "Analyzing: " hbes-fastq "\n"))
-        (let [guides (load-guides-file hbes-guides-csv-file)
-              outcomes (analyze-fastq-file-with-progress-exact-sgrna guides hbes-fastq)
-              output-file (str (.getName hbes-fastq) ".json")]
-          (println (str "Writing outcomes to file: " output-file))
-          (with-open [writer (io/writer output-file)]
-            (pretty-print-outcomes-json outcomes writer)))))))
+  (let [{:keys [action options exit-message ok?]} (validate-args args)]
+    (if exit-message
+      (exit (if ok? 0 1) exit-message)
+      (apply process-fastqs-edit-position action))))
