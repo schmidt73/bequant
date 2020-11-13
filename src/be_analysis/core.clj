@@ -43,7 +43,7 @@
     {:sg-rna (nth row 11)
      :guide-id (nth row 7)
      :target target
-     :pam (nth row 16)
+     :pam (nth row 31)
      :edit-pos edit-pos}))
 
 (defn load-guide-csv-hbes-row
@@ -53,7 +53,7 @@
     {:sg-rna (nth row 12)
      :guide-id (nth row 7)
      :target target
-     :pam (nth row 15)
+     :pam (nth row 31)
      :edit-pos edit-pos}))
 
 (defn lazily-load-guides
@@ -167,6 +167,7 @@
   [guide outcome-rep1 outcome-rep2 writer]
   (doseq [edit-pos (->> (map-indexed #(vector %1 %2) (:target guide))
                         (filter #(and (<= (first %) 30)
+                                      (>= (first %) 5)
                                       (= (second %) \C)))
                         (map first))]
     (pretty-print-outcomes-edit-pos-row
