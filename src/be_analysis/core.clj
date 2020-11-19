@@ -81,21 +81,22 @@
 
 (defn get-outcomes
   [guide sensor]
-  (cond
-    (not= 40 (count sensor))
-    [:indels]
+  (let [hd (hamming-distance (:target guide) sensor)]
+    (cond
+        (not= 40 (count sensor))
+        [:indels]
 
-    (= 0 (hamming-distance (:target guide) sensor))
-    [:non-edits]
+        (= 0 hd)
+        [:non-edits]
 
-    (not= 0 (hamming-distance (subs sensor 0 5) (subs (:target guide) 0 5)))
-    [:guide-sensor-mismatches]
+        (not= 0 (hamming-distance (subs sensor 0 5) (subs (:target guide) 0 5)))
+        [:guide-sensor-mismatches]
 
-    :otherwise
-    (->> (map #(if (not= %1 %2) {:from %1 :to %2}) (:target guide) sensor)
-         (map-indexed #(if %2 (assoc %2 :position %1)))
-         (filter identity)
-         (concat [:edits]))))
+        :otherwise
+        (->> (map #(if (not= %1 %2) {:from %1 :to %2 :distance hd}) (:target guide) sensor)
+             (map-indexed #(if %2 (assoc %2 :position %1)))
+             (filter identity)
+             (concat [:edits])))))
 
 (defn count-outcomes
   [guide-sensor-seq]
@@ -113,6 +114,11 @@
 
 ;;;; Pretty printing code
 
+(defn total-edit-count
+  [outcome from to position]
+  (reduce #(+ %1 (get outcome {:from from :to to :position position :distance %2} 0))
+          0 (range 45)))
+
 (defn pretty-print-row
   [guide outcome-rep1 outcome-rep2 writer]
   (let [guide-id (:guide-id guide)
@@ -121,23 +127,30 @@
         total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0)
                        (get outcome-rep1 :non-edits 0))
         percent-rep1 #(float (if (= total-rep1 0) 0 (* 100 (/ % total-rep1))))
-        c-to-a-rep1 (get outcome-rep1 {:from \C :to \A :position edit-pos} 0)
-        c-to-t-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos} 0)
-        c-to-g-rep1 (get outcome-rep1 {:from \C :to \G :position edit-pos} 0)
+        c-to-a-rep1 (total-edit-count outcome-rep1 \C \A edit-pos)
+        c-to-t-rep1 (total-edit-count outcome-rep1 \C \T edit-pos)
+        c-to-g-rep1 (total-edit-count outcome-rep1 \C \G edit-pos)
+        c-to-t-nc-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos :distance 1} 0)
         indels-rep1 (get outcome-rep1 :indels 0)
         total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0)
                        (get outcome-rep2 :non-edits 0))
         percent-rep2 #(float (if (= total-rep2 0) 0 (* 100 (/ % total-rep2))))
-        c-to-a-rep2 (get outcome-rep2 {:from \C :to \A :position edit-pos} 0)
-        c-to-t-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos} 0)
-        c-to-g-rep2 (get outcome-rep2 {:from \C :to \G :position edit-pos} 0)
+        c-to-a-rep2 (total-edit-count outcome-rep2 \C \A edit-pos)
+        c-to-t-rep2 (total-edit-count outcome-rep2 \C \T edit-pos)
+        c-to-g-rep2 (total-edit-count outcome-rep2 \C \G edit-pos)
+        c-to-t-nc-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos :distance 1} 0)
         indels-rep2 (get outcome-rep2 :indels 0)
-        line (string/join "," [guide-id total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1
-                               indels-rep1 total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2
-                               indels-rep2 (percent-rep1 c-to-t-rep1) (percent-rep1 c-to-a-rep1)
-                               (percent-rep1 c-to-g-rep1) (percent-rep1 indels-rep1)
+        line (string/join "," [guide-id
+                               total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1
+                               c-to-t-nc-rep1 indels-rep1
+                               total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2
+                               c-to-t-nc-rep2 indels-rep2
+                               (percent-rep1 c-to-t-rep1) (percent-rep1 c-to-a-rep1)
+                               (percent-rep1 c-to-g-rep1) (percent-rep1 c-to-t-nc-rep1)
+                               (percent-rep1 indels-rep1)
                                (percent-rep2 c-to-t-rep2) (percent-rep2 c-to-a-rep2)
-                               (percent-rep2 c-to-g-rep2) (percent-rep2 indels-rep2)])]
+                               (percent-rep2 c-to-g-rep2) (percent-rep2 c-to-t-nc-rep2)
+                               (percent-rep2 indels-rep2)])]
     (.append writer (str line "\n"))))
 
 (defn pretty-print-outcomes-edit-pos-row
@@ -147,20 +160,23 @@
         nuc-context (subs (:target guide) (max (- edit-pos 2) 0) (+ edit-pos 3))
         total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0))
         percent-rep1 #(float (if (= total-rep1 0) 0 (* 100 (/ % total-rep1))))
-        c-to-a-rep1 (get outcome-rep1 {:from \C :to \A :position edit-pos} 0)
-        c-to-t-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos} 0)
-        c-to-g-rep1 (get outcome-rep1 {:from \C :to \G :position edit-pos} 0)
+        c-to-a-rep1 (total-edit-count outcome-rep1 \C \A edit-pos)
+        c-to-t-rep1 (total-edit-count outcome-rep1 \C \T edit-pos)
+        c-to-g-rep1 (total-edit-count outcome-rep1 \C \G edit-pos)
+        c-to-t-nc-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos :distance 1} 0)
         total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0))
         percent-rep2 #(float (if (= total-rep2 0) 0 (* 100 (/ % total-rep2))))
-        c-to-a-rep2 (get outcome-rep2 {:from \C :to \A :position edit-pos} 0)
-        c-to-t-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos} 0)
-        c-to-g-rep2 (get outcome-rep2 {:from \C :to \G :position edit-pos} 0)
+        c-to-a-rep2 (total-edit-count outcome-rep2 \C \A edit-pos)
+        c-to-t-nc-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos :distance 1} 0)
+        c-to-t-rep2 (total-edit-count outcome-rep2 \C \T edit-pos)
+        c-to-g-rep2 (total-edit-count outcome-rep2 \C \G edit-pos)
         line (string/join "," [guide-id edit-pos pam nuc-context
-                               total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1
-                               total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2
+                               total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1 c-to-t-nc-rep1
+                               total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2 c-to-t-nc-rep2
                                (percent-rep1 c-to-t-rep1) (percent-rep1 c-to-a-rep1)
-                               (percent-rep1 c-to-g-rep1) (percent-rep2 c-to-t-rep2)
-                               (percent-rep2 c-to-a-rep2) (percent-rep2 c-to-g-rep2)])]
+                               (percent-rep1 c-to-g-rep1) (percent-rep1 c-to-t-nc-rep1)
+                               (percent-rep2 c-to-t-rep2) (percent-rep2 c-to-a-rep2)
+                               (percent-rep2 c-to-g-rep2) (percent-rep2 c-to-t-nc-rep2)])]
     (.append writer (str line "\n"))))
 
 (defn pretty-print-edit-pos-rows
@@ -175,13 +191,13 @@
 
 (defn pretty-print-outcomes-csv
   [outcomes-rep1 outcomes-rep2 writer]
-  (let [header (str "guide_ID,total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,"
-                    "indel_REP1,total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,"
-                    "indel_REP2,percent_tCTN_REP1,percent_tCAN_REP1,"
-                    "percent_tCGN_REP1,percent_indel_REP1,"
-                    "percent_tCTN_REP2,percent_tCAN_REP2,percent_tCGN_REP2,"
-                    "percent_indel_REP2,percent_tCTN,percent_tCAN,percent_tCGN,"
-                    "percent_indel")]
+  (let [header (str "guide_ID"
+                    "total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,tCT_REP1,indel_REP1,"
+                    "total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,tCT_REP2,indel_REP2,"
+                    "percent_tCTN_REP1,percent_tCAN_REP1,"
+                    "percent_tCGN_REP1,percent_tCT_REP1,percent_indel_REP1,"
+                    "percent_tCTN_REP2,percent_tCAN_REP2,"
+                    "percent_tCGN_REP2,percent_tCT_REP2,percent_indel_REP2")]
     (.append writer (str header "\n"))
     (doseq [guide (keys outcomes-rep1)]
       (let [outcome-rep1 (get outcomes-rep1 guide)
@@ -191,10 +207,10 @@
 (defn pretty-print-outcomes-edit-pos-csv
   [outcomes-rep1 outcomes-rep2 writer]
   (let [header (str "guide_ID,cytosine_position,PAM,surrounding nucleotide context (NNCNN),"
-                    "total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,total_REP2,tCTN_REP2,tCAN_REP2,"
-                    "tCGN_REP2,percent_tCTN_REP1,percent_tCAN_REP1,percent_tCGN_REP1,"
-                    "percent_tCTN_REP2,percent_tCAN_REP2,percent_tCGN_REP2,percent_tCTN,"
-                    "percent_tCAN,percent_tCGN")]
+                    "total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,tCT_REP1,"
+                    "total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,tCT_REP2,"
+                    "percent_tCTN_REP1,percent_tCAN_REP1,percent_tCGN_REP1,percent_tCT_REP1,"
+                    "percent_tCTN_REP2,percent_tCAN_REP2,percent_tCGN_REP2,percent_tCT_REP2")]
     (.append writer (str header "\n"))
     (doseq [guide (keys outcomes-rep1)]
       (let [outcome-rep1 (get outcomes-rep1 guide)
