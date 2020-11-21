@@ -191,7 +191,7 @@
 
 (defn pretty-print-outcomes-csv
   [outcomes-rep1 outcomes-rep2 writer]
-  (let [header (str "guide_ID"
+  (let [header (str "guide_ID,"
                     "total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,tCT_REP1,indel_REP1,"
                     "total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,tCT_REP2,indel_REP2,"
                     "percent_tCTN_REP1,percent_tCAN_REP1,"
