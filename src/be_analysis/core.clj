@@ -124,124 +124,92 @@
   (reduce #(+ %1 (get outcome {:from from :to to :position position :distance %2} 0))
           0 (range 45)))
 
+(defn pretty-print-outcome-row
+  [edit-pos outcome]
+  (let [total  (+ (get outcome :edits 0)
+                  (get outcome :indels 0)
+                  (get outcome :non-edits 0))
+        percent #(float (if (= total 0) 0 (* 100 (/ % total))))
+        c-to-a (total-edit-count outcome \C \A edit-pos)
+        c-to-t (total-edit-count outcome \C \T edit-pos)
+        c-to-g (total-edit-count outcome \C \G edit-pos)
+        c-to-t-nc (get outcome {:from \C :to \T :position edit-pos :distance 1} 0)
+        indels (get outcome :indels 0)]
+    (string/join "," [total c-to-t c-to-a c-to-g indels c-to-t-nc
+                      (percent c-to-t) (percent c-to-a) (percent c-to-g) (percent indels) (percent c-to-t-nc)])))
+
 (defn pretty-print-row
-  [guide outcome-rep1 outcome-rep2 writer]
+  [guide outcomes writer]
   (let [guide-id (:guide-id guide)
         edit-pos (+ (:edit-pos guide) 9)
         sequence (:target guide)
-        total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0)
-                       (get outcome-rep1 :non-edits 0))
-        percent-rep1 #(float (if (= total-rep1 0) 0 (* 100 (/ % total-rep1))))
-        c-to-a-rep1 (total-edit-count outcome-rep1 \C \A edit-pos)
-        c-to-t-rep1 (total-edit-count outcome-rep1 \C \T edit-pos)
-        c-to-g-rep1 (total-edit-count outcome-rep1 \C \G edit-pos)
-        c-to-t-nc-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos :distance 1} 0)
-        indels-rep1 (get outcome-rep1 :indels 0)
-        total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0)
-                       (get outcome-rep2 :non-edits 0))
-        percent-rep2 #(float (if (= total-rep2 0) 0 (* 100 (/ % total-rep2))))
-        c-to-a-rep2 (total-edit-count outcome-rep2 \C \A edit-pos)
-        c-to-t-rep2 (total-edit-count outcome-rep2 \C \T edit-pos)
-        c-to-g-rep2 (total-edit-count outcome-rep2 \C \G edit-pos)
-        c-to-t-nc-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos :distance 1} 0)
-        indels-rep2 (get outcome-rep2 :indels 0)
-        line (string/join "," [guide-id
-                               total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1
-                               c-to-t-nc-rep1 indels-rep1
-                               total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2
-                               c-to-t-nc-rep2 indels-rep2
-                               (percent-rep1 c-to-t-rep1) (percent-rep1 c-to-a-rep1)
-                               (percent-rep1 c-to-g-rep1) (percent-rep1 c-to-t-nc-rep1)
-                               (percent-rep1 indels-rep1)
-                               (percent-rep2 c-to-t-rep2) (percent-rep2 c-to-a-rep2)
-                               (percent-rep2 c-to-g-rep2) (percent-rep2 c-to-t-nc-rep2)
-                               (percent-rep2 indels-rep2)])]
+        printed-outcomes (map #(pretty-print-outcome-row edit-pos (get % guide)) outcomes)
+        line (str guide-id "," (string/join "," printed-outcomes))]
     (.append writer (str line "\n"))))
 
+(defn pretty-print-outcome-edit-pos-row
+  [outcome edit-pos]
+  (let [total  (+ (get outcome :edits 0) (get outcome :indels 0))
+        percent #(float (if (= total 0) 0 (* 100 (/ % total))))
+        c-to-a (total-edit-count outcome \C \A edit-pos)
+        c-to-t (total-edit-count outcome \C \T edit-pos)
+        c-to-g (total-edit-count outcome \C \G edit-pos)
+        c-to-t-nc (get outcome {:from \C :to \T :position edit-pos :distance 1} 0)]
+    (string/join "," [total c-to-t c-to-a c-to-g c-to-t-nc
+                      (percent c-to-t) (percent c-to-a) (percent c-to-g) (percent c-to-t-nc)])))
+
 (defn pretty-print-outcomes-edit-pos-row
-  [guide outcome-rep1 outcome-rep2 edit-pos writer]
+  [guide outcomes edit-pos writer]
   (let [guide-id (:guide-id guide)
         sequence (:sg-rna guide)
         pam (:pam guide)
         ex-pam (subs (:target guide) (+ 31 (count pam)) (+ 33 (count pam)))
         nuc-context (subs (:target guide) (max (- edit-pos 2) 0) (+ edit-pos 3))
-        total-rep1  (+ (get outcome-rep1 :edits 0) (get outcome-rep1 :indels 0))
-        percent-rep1 #(float (if (= total-rep1 0) 0 (* 100 (/ % total-rep1))))
-        c-to-a-rep1 (total-edit-count outcome-rep1 \C \A edit-pos)
-        c-to-t-rep1 (total-edit-count outcome-rep1 \C \T edit-pos)
-        c-to-g-rep1 (total-edit-count outcome-rep1 \C \G edit-pos)
-        c-to-t-nc-rep1 (get outcome-rep1 {:from \C :to \T :position edit-pos :distance 1} 0)
-        total-rep2  (+ (get outcome-rep2 :edits 0) (get outcome-rep2 :indels 0))
-        percent-rep2 #(float (if (= total-rep2 0) 0 (* 100 (/ % total-rep2))))
-        c-to-a-rep2 (total-edit-count outcome-rep2 \C \A edit-pos)
-        c-to-t-nc-rep2 (get outcome-rep2 {:from \C :to \T :position edit-pos :distance 1} 0)
-        c-to-t-rep2 (total-edit-count outcome-rep2 \C \T edit-pos)
-        c-to-g-rep2 (total-edit-count outcome-rep2 \C \G edit-pos)
-        line (string/join "," [guide-id sequence pam ex-pam edit-pos nuc-context
-                               total-rep1 c-to-t-rep1 c-to-a-rep1 c-to-g-rep1 c-to-t-nc-rep1
-                               total-rep2 c-to-t-rep2 c-to-a-rep2 c-to-g-rep2 c-to-t-nc-rep2
-                               (percent-rep1 c-to-t-rep1) (percent-rep1 c-to-a-rep1)
-                               (percent-rep1 c-to-g-rep1) (percent-rep1 c-to-t-nc-rep1)
-                               (percent-rep2 c-to-t-rep2) (percent-rep2 c-to-a-rep2)
-                               (percent-rep2 c-to-g-rep2) (percent-rep2 c-to-t-nc-rep2)])]
-    (.append writer (str line "\n"))))
+        prefix (string/join "," [guide-id sequence pam ex-pam edit-pos nuc-context])
+        suffix (string/join "," (map #(pretty-print-outcome-edit-pos-row (get % guide) edit-pos) outcomes))]
+    (.append writer (str prefix "," suffix "\n"))))
 
 (defn pretty-print-edit-pos-rows
-  [guide outcome-rep1 outcome-rep2 writer]
+  [guide outcomes writer]
   (doseq [edit-pos (->> (map-indexed #(vector %1 %2) (:target guide))
                         (filter #(and (<= (first %) 30)
                                       (>= (first %) 5)
                                       (= (second %) \C)))
                         (map first))]
-    (pretty-print-outcomes-edit-pos-row
-     guide outcome-rep1 outcome-rep2 edit-pos writer)))
+    (pretty-print-outcomes-edit-pos-row guide outcomes edit-pos writer)))
 
 (defn pretty-print-outcomes-csv
-  [outcomes-rep1 outcomes-rep2 writer]
-  (let [header (str "guide_ID,"
-                    "total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,tCT_REP1,indel_REP1,"
-                    "total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,tCT_REP2,indel_REP2,"
-                    "percent_tCTN_REP1,percent_tCAN_REP1,"
-                    "percent_tCGN_REP1,percent_tCT_REP1,percent_indel_REP1,"
-                    "percent_tCTN_REP2,percent_tCAN_REP2,"
-                    "percent_tCGN_REP2,percent_tCT_REP2,percent_indel_REP2")]
+  [outcomes writer]
+  (let [outcome-headers
+        (for [i (range (count outcomes))]
+          (apply format
+                 (str
+                  "total_REP%d,tCTN_REP%d,tCAN_REP%d,tCGN_REP%d,tCT_REP%d,indel_REP%d,"
+                  "percent_tCTN_REP%d,percent_tCAN_REP%d,"
+                  "percent_tCGN_REP%d,percent_tCT_REP%d,percent_indel_REP%d")
+                 (take 1000 (repeat (+ 1 i)))))
+        header (str "guide_ID," (string/join "," outcome-headers))]
     (.append writer (str header "\n"))
-    (doseq [guide (keys outcomes-rep1)]
-      (let [outcome-rep1 (get outcomes-rep1 guide)
-            outcome-rep2 (get outcomes-rep2 guide)]
-        (pretty-print-row guide outcome-rep1 outcome-rep2 writer)))))
+    (doseq [guide (keys (first outcomes))]
+      (pretty-print-row guide outcomes writer))))
 
 (defn pretty-print-outcomes-edit-pos-csv
-  [outcomes-rep1 outcomes-rep2 writer]
-  (let [header (str "guide_ID,sequence,PAM,exPAM,"
-                    "cytosine_position,surrounding nucleotide context (NNCNN),"
-                    "total_REP1,tCTN_REP1,tCAN_REP1,tCGN_REP1,tCT_REP1,"
-                    "total_REP2,tCTN_REP2,tCAN_REP2,tCGN_REP2,tCT_REP2,"
-                    "percent_tCTN_REP1,percent_tCAN_REP1,percent_tCGN_REP1,percent_tCT_REP1,"
-                    "percent_tCTN_REP2,percent_tCAN_REP2,percent_tCGN_REP2,percent_tCT_REP2")]
-    (.append writer (str header "\n"))
-    (doseq [guide (keys outcomes-rep1)]
-      (let [outcome-rep1 (get outcomes-rep1 guide)
-            outcome-rep2 (get outcomes-rep2 guide)]
-        (pretty-print-edit-pos-rows guide outcome-rep1 outcome-rep2 writer)))))
-
-(defn jsonify-outcomes
-  [outcomes]
-  (map (fn [[guide outcomes]]
-         [guide
-          {:total (+ (get outcomes :edits 0) (get outcomes :indels 0))
-           :indels (get outcomes :indels 0)
-           :outcomes (->> (map (fn [[k v]] (if (map? k) (assoc k :count v))) outcomes)
-                          (filter identity))}])
-       outcomes))
-
-(defn pretty-print-outcomes-json
   [outcomes writer]
-  (-> (jsonify-outcomes outcomes)
-      (chesire/generate-stream writer)))
+  (let [outcome-headers
+        (for [i (range (count outcomes))]
+          (apply format
+                 (str
+                  "total_REP%d,tCTN_REP%d,tCAN_REP%d,tCGN_REP%d,tCT_REP%d,"
+                  "percent_tCTN_REP%d,percent_tCAN_REP%d,percent_tCGN_REP%d,percent_tCT_REP%d")
+                 (take 1000 (repeat i))))
+        header (str "guide_ID,sequence,PAM,exPAM,"
+                    "cytosine_position,surrounding nucleotide context (NNCNN),"
+                    (string/join "," outcome-headers))]
+    (.append writer (str header "\n"))
+    (doseq [guide (keys (first outcomes))]
+      (pretty-print-edit-pos-rows guide outcomes writer))))
 
 ;;;; Code that actually does data analysis
-
 (defmulti analyze-fastq-file-with-progress
   (fn [screen-type _ _]
     (get {:all-pam :with-pam :hbes :no-pam :mbes :no-pam}
@@ -294,21 +262,16 @@
    :all-pam (load-guides-file load-guide-csv-all-pams-row
                               (io/resource "ALL_PAM_whitelist.csv"))})
 
-;; (analyze-fastq-file-with-progress :all-pam
-;;                                   (:all-pam guides-map)
-;;                                   "/home/schmidt73/tmp/fastqs/ALL_PAMS_RA2_REP1/merged.fastq")
-
 (defn process-fastqs-edit-position
-  [output-file rep1 rep2 screen-type format]
+  [output-file replicates screen-type format]
   (let [guides (screen-type guides-map)
-        outcomes-rep1 (do (timbre/info "Processing FASTq file:" rep1)
-                          (analyze-fastq-file-with-progress screen-type guides rep1))
-        outcomes-rep2 (do (timbre/info "Processing FASTq file:" rep2)
-                          (analyze-fastq-file-with-progress screen-type guides rep2))]
+        outcomes (for [rep replicates]
+                   (do (timbre/info "Processing FASTq file:" rep)
+                       (analyze-fastq-file-with-progress screen-type guides rep)))]
     (with-open [writer (io/writer output-file)]
       (case format
-        :target (pretty-print-outcomes-csv outcomes-rep1 outcomes-rep2 writer)
-        :all (pretty-print-outcomes-edit-pos-csv outcomes-rep1 outcomes-rep2 writer)))))
+        :target (pretty-print-outcomes-csv outcomes writer)
+        :all (pretty-print-outcomes-edit-pos-csv outcomes writer)))))
   
 ;;;; CLI 
 
@@ -327,7 +290,7 @@
    ["-h" "--help"]])
 
 (defn usage [options-summary]
-  (->> ["Usage: java -jar analyze-fastqs rep1 rep2 [options]"
+  (->> ["Usage: java -jar analyze-fastqs rep1 ... repN [options]"
         ""
         "Options:"
         options-summary
@@ -347,8 +310,8 @@
       (:help options) {:exit-message (usage summary) :ok? true}
       errors          {:exit-message (error-msg errors)}
 
-      (and (= 2 (count arguments)) (:output options))
-      {:action [(:output options) (first arguments) (second arguments)
+      (and (<= 1 (count arguments)) (:output options))
+      {:action [(:output options) arguments 
                 (:screen options) (:format options)]}
 
       :else {:exit-message (usage summary)})))
