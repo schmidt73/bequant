@@ -78,6 +78,21 @@
     (->> (lazily-load-guides rdr row-reader)
          (vec))))
 
+(defn jsonify-outcomes
+  [outcomes]
+  (into {}
+    (map (fn [[guide outcomes]]
+           [(:guide-id guide)
+            {:total (:total outcomes)
+             :outcomes (->> (map (fn [[k v]] (if (map? k) (assoc k :count v))) outcomes)
+                            (filter identity))}])
+     outcomes)))
+
+(defn pretty-print-outcomes-json
+  [outcomes writer]
+  (-> (jsonify-outcomes outcomes)
+      (chesire/generate-stream writer)))
+
 ;;;; Data analysis code
 
 (defn hamming-distance
@@ -135,8 +150,9 @@
         c-to-g (total-edit-count outcome \C \G edit-pos)
         c-to-t-nc (get outcome {:from \C :to \T :position edit-pos :distance 1} 0)
         indels (get outcome :indels 0)]
-    (string/join "," [total c-to-t c-to-a c-to-g indels c-to-t-nc
-                      (percent c-to-t) (percent c-to-a) (percent c-to-g) (percent indels) (percent c-to-t-nc)])))
+    (string/join "," [total c-to-t c-to-a c-to-g c-to-t-nc indels
+                      (percent c-to-t) (percent c-to-a) (percent c-to-g)
+                      (percent c-to-t-nc) (percent indels)])))
 
 (defn pretty-print-row
   [guide outcomes writer]
@@ -255,38 +271,35 @@
            (count-outcomes)))))
 
 (def guides-map
-  {:mbes    (load-guides-file load-guide-csv-mbes-row
-                              (io/resource "MBESv4_revised_whitelist.csv"))
+  {:mbes    (load-guides-file load-guide-csv-mbes-row (io/resource "MBESv4_revised_whitelist.csv"))
    :hbes    (load-guides-file load-guide-csv-hbes-row
                               (io/resource "HBESv4_revised_whitelist.csv"))
    :all-pam (load-guides-file load-guide-csv-all-pams-row
                               (io/resource "ALL_PAM_whitelist.csv"))})
 
 (defn process-fastqs-edit-position
-  [output-file replicates screen-type format]
-  (let [guides (screen-type guides-map)
+  [output-file replicates whitelist format]
+  (println whitelist)
+  (let [guides (load-guides-file load-guide-csv-hbes-row whitelist)
         outcomes (for [rep replicates]
                    (do (timbre/info "Processing FASTq file:" rep)
-                       (analyze-fastq-file-with-progress screen-type guides rep)))]
+                       (analyze-fastq-file-with-progress :hbes guides rep)))]
     (with-open [writer (io/writer output-file)]
       (case format
         :target (pretty-print-outcomes-csv outcomes writer)
+        :json (pretty-print-outcomes-json outcomes writer)
         :all (pretty-print-outcomes-edit-pos-csv outcomes writer)))))
   
 ;;;; CLI 
 
 (def cli-options
   [["-o" "--output FILE" "Output file (REQUIRED)."]
-   ["-s" "--screen SCREEN" "Screen to pull whitelist for"
-    :default :mbes
-    :default-desc "MBES"
-    :parse-fn #(keyword (string/lower-case %))
-    :validate [#{:mbes :hbes :all-pam} "must be one of ['MBES', 'HBES', 'ALL-PAM']"]]
+   ["-w" "--whitelist WHITELIST" "Whitelist file for screen (REQUIRED)."]
    ["-f" "--format OUTPUT_FORMAT" "Output either only target cytosine or all cytosines."
     :default :target
     :default-desc "TARGET"
     :parse-fn #(keyword (string/lower-case %))
-    :validate [#{:target :all} "must be one of ['TARGET', 'ALL']"]]
+    :validate [#{:target :all :json} "must be one of ['TARGET', 'ALL', 'JSON']"]]
    ["-h" "--help"]])
 
 (defn usage [options-summary]
@@ -310,9 +323,9 @@
       (:help options) {:exit-message (usage summary) :ok? true}
       errors          {:exit-message (error-msg errors)}
 
-      (and (<= 1 (count arguments)) (:output options))
+      (and (<= 1 (count arguments)) (:output options) (:whitelist options))
       {:action [(:output options) arguments 
-                (:screen options) (:format options)]}
+                (:whitelist options) (:format options)]}
 
       :else {:exit-message (usage summary)})))
 
