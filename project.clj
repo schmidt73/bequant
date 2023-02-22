@@ -5,6 +5,7 @@
                  [org.clojure/data.csv "1.0.0"]
                  [org.clojure/tools.cli "1.0.194"]
                  [com.taoensso/timbre "5.1.0"]
+                 [org.clojure/data.json "2.4.0"]
                  [clj-http "3.10.3"]
                  [cheshire "5.10.0"]]
   :profiles {:uberjar {:aot :all}

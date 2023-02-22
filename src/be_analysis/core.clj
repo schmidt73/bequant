@@ -2,81 +2,56 @@
   (:gen-class)
   (:require [clojure.string :as string]
             [clojure.data.csv :as csv]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [taoensso.timbre :as timbre]
             [cheshire.core :as chesire]
             [clojure.tools.cli :refer [parse-opts]]))
 
 ;;;; Data loading code 
-
-(defn get-pam
-  [s]
-  (let [lscaffold "AAAAAGTGGCACCGAGTCGGTGCTTTTTTT"
-        rscaffold "GCATGAATTC"]
-    (if-let [lindex (string/last-index-of s lscaffold)]
-      (if-let [rindex (string/last-index-of s rscaffold)]
-        (if (< lindex rindex) 
-          (subs s (- rindex 10) (- rindex 7)))))))
-
 (defn get-sensor
-  [format s]
-  (let [lscaffold "AAAAAGTGGCACCGAGTCGGTGCTTTTTTT"
-        rscaffold (get {:with-pam "GCATGAATTC" :no-pam "GAATTC"} format)]
+  [config s]
+  (let [lscaffold (:sensor-left-scaffold config)
+        rscaffold (:sensor-right-scaffold config)] 
     (if-let [lindex (string/last-index-of s lscaffold)]
       (if-let [rindex (string/last-index-of s rscaffold)]
         (if (< lindex rindex) 
           (subs s (+ lindex (count lscaffold)) rindex))))))
 
-; good
 (defn get-sg-rna
-  [s]
-  (let [lscaffold "CACC"
-        rscaffold "GTTTAAGAGCTATGCTGGAAACAGCATAGCAAGTTTAAATAAGGCTAGTCCGTTATCAACTTGAAAAAGTGGCACCGAGTCGGTGCTTTTTTT"]
+  [config s]
+  (let [lscaffold (:sgrna-left-scaffold config)
+        rscaffold (:sgrna-right-scaffold config)]
     (if-let [lindex (string/index-of s lscaffold)]
       (if-let [rindex (string/index-of s rscaffold)]
         (if (< lindex rindex)
           (subs s (+ lindex (count lscaffold)) rindex))))))
 
-(defn load-guide-csv-mbes-row
-  [row]
+(defn load-guide-csv-row
+  [config row]
   (let [edit-pos (Integer/parseInt (nth row 18))
-        target (subs (nth row 13) 135 175)]
-    {:sg-rna (nth row 11)
-     :guide-id (nth row 7)
-     :target target
-     :pam (nth row 31)
-     :edit-pos edit-pos}))
-
-(defn load-guide-csv-hbes-row
-  [row]
-  (let [edit-pos (Integer/parseInt (nth row 18))
-        target (subs (nth row 13) 135 175)]
+        target (subs (nth row 13) (:target-start config) (:target-end config))]
     {:sg-rna (nth row 12)
      :guide-id (nth row 7)
      :target target
      :pam (nth row 31)
      :edit-pos edit-pos}))
 
-(defn load-guide-csv-all-pams-row
-  [row]
-  (let [edit-pos (Integer/parseInt (nth row 2))
-        target (subs (nth row 4) 117 157)]
-    {:sg-rna (nth row 3)
-     :edit-pos edit-pos
-     :pam (nth row 1)
-     :target target
-     :guide-id (nth row 0)}))
-
 (defn lazily-load-guides
   [rdr row-reader]
   (->> (rest (csv/read-csv rdr))
        (map row-reader)))
 
-(defn load-guides-file
+(defn load-whitelist
   [row-reader guides-csv-file]
   (with-open [rdr (io/reader guides-csv-file)]
     (->> (lazily-load-guides rdr row-reader)
          (vec))))
+
+(defn load-config
+  [config-file]
+  (-> (slurp config-file)
+      (json/read-str :key-fn keyword)))
 
 (defn jsonify-outcomes
   [outcomes]
@@ -94,16 +69,16 @@
       (chesire/generate-stream writer)))
 
 ;;;; Data analysis code
-
 (defn hamming-distance
   [s1 s2]
   (count (filter not (map = s1 s2))))
 
+;; TODO: FIX, it incorrectly detects INDELS at moment
 (defn get-outcomes
   [guide sensor]
   (let [hd (hamming-distance (:target guide) sensor)]
     (cond
-        (not= 40 (count sensor))
+        (not= (count (:target guide)) (count sensor))
         [:indels]
 
         (= 0 hd)
@@ -225,43 +200,16 @@
     (doseq [guide (keys (first outcomes))]
       (pretty-print-edit-pos-rows guide outcomes writer))))
 
-;;;; Code that actually does data analysis
-(defmulti analyze-fastq-file-with-progress
-  (fn [screen-type _ _]
-    (get {:all-pam :with-pam :hbes :no-pam :mbes :no-pam}
-         screen-type)))
-
-(defmethod analyze-fastq-file-with-progress
-  :with-pam
-  [_ guides fastq-file]
-  (let [counter (atom 0)
-        sg-rna-and-pam-to-guide (into {} (map #(vector (select-keys % [:sg-rna :pam]) %) guides))]
-    (with-open [reader (io/reader fastq-file)]
-      (->> (line-seq reader)
-           (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
-           (filter identity)
-           (map #(vector (get sg-rna-and-pam-to-guide {:sg-rna (get-sg-rna %) :pam (get-pam %)})
-                         (get-sensor :with-pam %)
-                         {:sg-rna (get-sg-rna %) :pam (get-pam %)}))
-           (filter #(and (some? (first %)) (some? (second %))))
-           (map #(do
-                   (when (= 0 (mod @counter 10000))
-                     (timbre/info (str "FASTq Records Processed: " @counter)))
-                   (swap! counter inc)
-                   %))
-           (count-outcomes)))))
-
-(defmethod analyze-fastq-file-with-progress
-  :no-pam
-  [_ guides fastq-file]
+(defn analyze-fastq-file-with-progress
+  [config guides fastq-file]
   (let [counter (atom 0)
         sg-rna-to-guide (into {} (map #(vector (:sg-rna %) %) guides))]
     (with-open [reader (io/reader fastq-file)]
       (->> (line-seq reader)
            (map-indexed (fn [idx item] (if (= 0 (mod (dec idx) 4)) item)))
            (filter identity)
-           (map #(vector (get sg-rna-to-guide (get-sg-rna %))
-                         (get-sensor :no-pam %)))
+           (map #(vector (get sg-rna-to-guide (get-sg-rna config %))
+                         (get-sensor config %)))
            (filter #(and (some? (first %)) (some? (second %))))
            (map #(do
                    (when (= 0 (mod @counter 10000))
@@ -270,20 +218,13 @@
                    %))
            (count-outcomes)))))
 
-(def guides-map
-  {:mbes    (load-guides-file load-guide-csv-mbes-row (io/resource "MBESv4_revised_whitelist.csv"))
-   :hbes    (load-guides-file load-guide-csv-hbes-row
-                              (io/resource "HBESv4_revised_whitelist.csv"))
-   :all-pam (load-guides-file load-guide-csv-all-pams-row
-                              (io/resource "ALL_PAM_whitelist.csv"))})
-
 (defn process-fastqs-edit-position
-  [output-file replicates whitelist format]
-  (println whitelist)
-  (let [guides (load-guides-file load-guide-csv-hbes-row whitelist)
+  [output-file replicates whitelist format config]
+  (let [config (load-config config)
+        guides (load-whitelist #(load-guide-csv-row config %) whitelist)
         outcomes (for [rep replicates]
                    (do (timbre/info "Processing FASTq file:" rep)
-                       (analyze-fastq-file-with-progress :hbes guides rep)))]
+                       (analyze-fastq-file-with-progress config guides rep)))]
     (with-open [writer (io/writer output-file)]
       (case format
         :target (pretty-print-outcomes-csv outcomes writer)
@@ -291,10 +232,10 @@
         :all (pretty-print-outcomes-edit-pos-csv outcomes writer)))))
   
 ;;;; CLI 
-
 (def cli-options
   [["-o" "--output FILE" "Output file (REQUIRED)."]
    ["-w" "--whitelist WHITELIST" "Whitelist file for screen (REQUIRED)."]
+   ["-c" "--config CONFIG" "Configuration file describing sensor and whitelist structure (REQUIRED)."]
    ["-f" "--format OUTPUT_FORMAT" "Output either only target cytosine or all cytosines."
     :default :target
     :default-desc "TARGET"
@@ -322,10 +263,9 @@
     (cond
       (:help options) {:exit-message (usage summary) :ok? true}
       errors          {:exit-message (error-msg errors)}
-
-      (and (<= 1 (count arguments)) (:output options) (:whitelist options))
+      (and (<= 1 (count arguments)) (:output options) (:whitelist options) (:config options))
       {:action [(:output options) arguments 
-                (:whitelist options) (:format options)]}
+                (:whitelist options) (:format options) (:config options)]}
 
       :else {:exit-message (usage summary)})))
 
