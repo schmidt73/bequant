@@ -115,90 +115,103 @@
           0 (range 45)))
 
 (defn pretty-print-outcome-row
-  [edit-pos outcome]
+  [edit-pos base outcome]
   (let [total  (+ (get outcome :edits 0)
                   (get outcome :indels 0)
                   (get outcome :non-edits 0))
-        percent #(float (if (= total 0) 0 (* 100 (/ % total))))
-        c-to-a (total-edit-count outcome \C \A edit-pos)
-        c-to-t (total-edit-count outcome \C \T edit-pos)
-        c-to-g (total-edit-count outcome \C \G edit-pos)
-        c-to-t-nc (get outcome {:from \C :to \T :position edit-pos :distance 1} 0)
+        non-edits "N/A"
+        base-to-a (if (= \A base) non-edits (total-edit-count outcome base \A edit-pos))
+        base-to-c (if (= \C base) non-edits (total-edit-count outcome base \C edit-pos))
+        base-to-g (if (= \G base) non-edits (total-edit-count outcome base \G edit-pos))
+        base-to-t (if (= \T base) non-edits (total-edit-count outcome base \T edit-pos))
+        base-to-a-nc (if (= \A base) non-edits (get outcome {:from base :to \A :position edit-pos :distance 1} 0))
+        base-to-c-nc (if (= \C base) non-edits (get outcome {:from base :to \C :position edit-pos :distance 1} 0))
+        base-to-g-nc (if (= \G base) non-edits (get outcome {:from base :to \G :position edit-pos :distance 1} 0)) 
+        base-to-t-nc (if (= \T base) non-edits (get outcome {:from base :to \T :position edit-pos :distance 1} 0))
         indels (get outcome :indels 0)]
-    (string/join "," [total c-to-t c-to-a c-to-g c-to-t-nc indels
-                      (percent c-to-t) (percent c-to-a) (percent c-to-g)
-                      (percent c-to-t-nc) (percent indels)])))
+    (string/join "," [total base-to-a base-to-c base-to-g base-to-t
+                      base-to-a-nc base-to-c-nc base-to-g-nc base-to-t-nc indels])))
 
 (defn pretty-print-row
-  [guide outcomes writer]
+  [guide base outcomes writer]
   (let [guide-id (:guide-id guide)
         edit-pos (+ (:edit-pos guide) 9)
         sequence (:target guide)
-        printed-outcomes (map #(pretty-print-outcome-row edit-pos (get % guide)) outcomes)
+        printed-outcomes (map #(pretty-print-outcome-row edit-pos base (get % guide)) outcomes)
         line (str guide-id "," (string/join "," printed-outcomes))]
     (.append writer (str line "\n"))))
 
 (defn pretty-print-outcome-edit-pos-row
-  [outcome edit-pos]
+  [outcome base edit-pos]
   (let [total  (+ (get outcome :edits 0) (get outcome :indels 0))
-        percent #(float (if (= total 0) 0 (* 100 (/ % total))))
-        c-to-a (total-edit-count outcome \C \A edit-pos)
-        c-to-t (total-edit-count outcome \C \T edit-pos)
-        c-to-g (total-edit-count outcome \C \G edit-pos)
-        c-to-t-nc (get outcome {:from \C :to \T :position edit-pos :distance 1} 0)]
-    (string/join "," [total c-to-t c-to-a c-to-g c-to-t-nc
-                      (percent c-to-t) (percent c-to-a) (percent c-to-g) (percent c-to-t-nc)])))
+        non-edits "N/A"
+        base-to-a (if (= \A base) non-edits (total-edit-count outcome base \A edit-pos))
+        base-to-c (if (= \C base) non-edits (total-edit-count outcome base \C edit-pos))
+        base-to-g (if (= \G base) non-edits (total-edit-count outcome base \G edit-pos))
+        base-to-t (if (= \T base) non-edits (total-edit-count outcome base \T edit-pos))
+        base-to-a-nc (if (= \A base) non-edits (get outcome {:from base :to \A :position edit-pos :distance 1} 0))
+        base-to-c-nc (if (= \C base) non-edits (get outcome {:from base :to \C :position edit-pos :distance 1} 0))
+        base-to-g-nc (if (= \G base) non-edits (get outcome {:from base :to \G :position edit-pos :distance 1} 0))
+        base-to-t-nc (if (= \T base) non-edits (get outcome {:from base :to \T :position edit-pos :distance 1} 0))
+        indels (get outcome :indels 0)]
+    (string/join "," [total base-to-a base-to-c base-to-g base-to-t
+                      base-to-a-nc base-to-c-nc base-to-g-nc base-to-t-nc indels])))
 
 (defn pretty-print-outcomes-edit-pos-row
-  [guide outcomes edit-pos writer]
+  [guide base outcomes edit-pos writer]
   (let [guide-id (:guide-id guide)
         sequence (:sg-rna guide)
         pam (:pam guide)
         ex-pam (subs (:target guide) (+ 31 (count pam)) (+ 33 (count pam)))
         nuc-context (subs (:target guide) (max (- edit-pos 2) 0) (+ edit-pos 3))
         prefix (string/join "," [guide-id sequence pam ex-pam edit-pos nuc-context])
-        suffix (string/join "," (map #(pretty-print-outcome-edit-pos-row (get % guide) edit-pos) outcomes))]
+        suffix (string/join "," (map #(pretty-print-outcome-edit-pos-row (get % guide) base edit-pos) outcomes))]
     (.append writer (str prefix "," suffix "\n"))))
 
 (defn pretty-print-edit-pos-rows
-  [guide outcomes writer]
+  [guide base outcomes writer]
   (doseq [edit-pos (->> (map-indexed #(vector %1 %2) (:target guide))
                         (filter #(and (<= (first %) 30)
                                       (>= (first %) 5)
-                                      (= (second %) \C)))
+                                      (= (second %) base)))
                         (map first))]
-    (pretty-print-outcomes-edit-pos-row guide outcomes edit-pos writer)))
+    (pretty-print-outcomes-edit-pos-row guide base outcomes edit-pos writer)))
+
+(def pp-outcomes-header-format-string
+    {\C (str "total_REP%d,tCAN_REP%d,tCCN_REP%d,tCGN_REP%d,tCTN_REP%d,"
+             "tCA_REP%d,tCC_REP%d,tCG_REP%d,tCT_REP%d,tINDEL_REP%d"),
+     \T (str "total_REP%d,tTAN_REP%d,tTCN_REP%d,tTGN_REP%d,tTTN_REP%d,"
+             "tTA_REP%d,tTC_REP%d,tTG_REP%d,tTT_REP%d,tINDEL_REP%d"),
+     \G (str "total_REP%d,tGAN_REP%d,tGCN_REP%d,tGGN_REP%d,tGTN_REP%d,"
+             "tGA_REP%d,tGC_REP%d,tGG_REP%d,tGT_REP%d,tINDEL_REP%d")
+     \A (str "total_REP%d,tAAN_REP%d,tACN_REP%d,tAGN_REP%d,tATN_REP%d,"
+             "tAA_REP%d,tAC_REP%d,tAG_REP%d,tAT_REP%d,tINDEL_REP%d")})
 
 (defn pretty-print-outcomes-csv
-  [outcomes writer]
+  [outcomes writer base]
   (let [outcome-headers
         (for [i (range (count outcomes))]
           (apply format
-                 (str
-                  "total_REP%d,tCTN_REP%d,tCAN_REP%d,tCGN_REP%d,tCT_REP%d,indel_REP%d,"
-                  "percent_tCTN_REP%d,percent_tCAN_REP%d,"
-                  "percent_tCGN_REP%d,percent_tCT_REP%d,percent_indel_REP%d")
+                 (get pp-outcomes-header-format-string base)
                  (take 1000 (repeat (+ 1 i)))))
         header (str "guide_ID," (string/join "," outcome-headers))]
     (.append writer (str header "\n"))
     (doseq [guide (keys (first outcomes))]
-      (pretty-print-row guide outcomes writer))))
+      (pretty-print-row guide base outcomes writer))))
 
 (defn pretty-print-outcomes-edit-pos-csv
-  [outcomes writer]
+  [outcomes writer base]
   (let [outcome-headers
         (for [i (range (count outcomes))]
           (apply format
-                 (str
-                  "total_REP%d,tCTN_REP%d,tCAN_REP%d,tCGN_REP%d,tCT_REP%d,"
-                  "percent_tCTN_REP%d,percent_tCAN_REP%d,percent_tCGN_REP%d,percent_tCT_REP%d")
+                 (get pp-outcomes-header-format-string base)
                  (take 1000 (repeat i))))
         header (str "guide_ID,sequence,PAM,exPAM,"
-                    "cytosine_position,surrounding nucleotide context (NNCNN),"
+                    "edit_position,surrounding nucleotide context (NNCNN),"
                     (string/join "," outcome-headers))]
     (.append writer (str header "\n"))
     (doseq [guide (keys (first outcomes))]
-      (pretty-print-edit-pos-rows guide outcomes writer))))
+      (pretty-print-edit-pos-rows guide base outcomes writer))))
 
 (defn analyze-fastq-file-with-progress
   [config guides fastq-file]
@@ -219,7 +232,7 @@
            (count-outcomes)))))
 
 (defn process-fastqs-edit-position
-  [output-file replicates whitelist format config]
+  [output-file replicates whitelist format config base]
   (let [config (load-config config)
         guides (load-whitelist #(load-guide-csv-row config %) whitelist)
         outcomes (for [rep replicates]
@@ -227,15 +240,20 @@
                        (analyze-fastq-file-with-progress config guides rep)))]
     (with-open [writer (io/writer output-file)]
       (case format
-        :target (pretty-print-outcomes-csv outcomes writer)
+        :target (pretty-print-outcomes-csv outcomes writer base)
         :json (pretty-print-outcomes-json outcomes writer)
-        :all (pretty-print-outcomes-edit-pos-csv outcomes writer)))))
+        :all (pretty-print-outcomes-edit-pos-csv outcomes writer base)))))
   
 ;;;; CLI 
 (def cli-options
   [["-o" "--output FILE" "Output file (REQUIRED)."]
    ["-w" "--whitelist WHITELIST" "Whitelist file for screen (REQUIRED)."]
    ["-c" "--config CONFIG" "Configuration file describing sensor and whitelist structure (REQUIRED)."]
+   ["-b" "--base BASE" "Base to analyze (REQUIRED)."
+    :default \C
+    :default-desc "C"
+    :parse-fn #(get % 0)
+    :validate [#{\A \C \T \G} "must be one of ['A', 'T', 'C', 'G']"]]
    ["-f" "--format OUTPUT_FORMAT" "Output either only target cytosine or all cytosines."
     :default :target
     :default-desc "TARGET"
@@ -265,7 +283,7 @@
       errors          {:exit-message (error-msg errors)}
       (and (<= 1 (count arguments)) (:output options) (:whitelist options) (:config options))
       {:action [(:output options) arguments 
-                (:whitelist options) (:format options) (:config options)]}
+                (:whitelist options) (:format options) (:config options) (:base options)]}
 
       :else {:exit-message (usage summary)})))
 
