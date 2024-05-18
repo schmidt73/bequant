@@ -9,14 +9,15 @@ import numpy as np
 from abc import abstractmethod
 from loguru import logger
 from dataclasses import dataclass
+from collections import defaultdict
 
 class Matcher:
     """
-    A matcher object provides functionality to take 
-    a (potentially edited) sgRNA and match it against 
-    a whitelist of sgRNAs. The matcher object provides
-    the `match` method which returns the best matching
-    sgRNA from the whitelist, if any.
+    A matcher object provides functionality to take a  (potentially 
+    edited) sgRNA and match it against  a whitelist of sgRNAs. The 
+    matcher object provides the `match` method which returns the ID 
+    of the best  matching sgRNA from the whitelist, if any match 
+    exists.
     """
 
     @abstractmethod
@@ -32,12 +33,12 @@ class ExactMatcher(Matcher):
     def __init__(self, whitelist):
         self.whitelist = whitelist
         self.whitelist_dictionary = {}
-        for guide in self.whitelist:
+        for guide in self.whitelist.values():
             self.whitelist_dictionary[guide['sgRNA']] = guide
 
     def match(self, sgRNA):
         if sgRNA in self.whitelist_dictionary:
-            return self.whitelist_dictionary[sgRNA]
+            return self.whitelist_dictionary[sgRNA]['guide_ID']
 
         return None
 
@@ -101,17 +102,61 @@ def match_fastq(sensor_structure, matcher, fastq_file):
 
     return matched_reads
 
+def quantify_guide_editing(guide, matched_reads):
+    """
+    Quantifies the editing outcomes for all reads
+    matching the guide. Returns a dictionary counting
+    the different type of edits.
+    """
+
+    def hd(s1, s2):
+        return sum(s1[i] != s2[i] for i in range(len(s1)))
+
+    sgrna = guide['sgRNA']
+
+    outcomes = {
+        'non_edits': 0,
+        'indels': 0,
+        'edits': defaultdict(int)
+    }
+
+    for read in matched_reads:
+        genomic_sensor = read['genomic_sensor']
+        if len(genomic_sensor) != len(sgrna):
+            outcomes['indels'] += 1
+            continue
+
+        hamming_distance = hd(sgrna, genomic_sensor)
+        if hamming_distance == 0:
+            outcomes['non_edits'] += 1
+            continue
+
+        for i in range(len(sgrna)):
+            if sgrna[i] == genomic_sensor[i]: continue
+            edit = (sgrna[i], genomic_sensor[i], hamming_distance, i) # (from, to, hamming-distance, position)
+            outcomes['edits'][edit] += 1
+
+    outcomes['total_edits'] = len(matched_reads) - outcomes['non_edits']
+
+    return outcomes
 
 def process_whitelist(whitelist_file):
     """
-    Reads the whitelist and returns a list of guides to quantify,
-    each guide is represented as a dictionary.
+    Reads the whitelist and returns a dictionary mapping guide IDs
+    to the guide, where each guide is represented as a dictionary.
     """
 
     whitelist = pd.read_csv(whitelist_file)
     whitelist =  whitelist[['guide_ID', 'sgRNA', 'target_position', 'PAM',]]
+    if not all(~whitelist['guide_ID'].duplicated()):
+        raise Exception("Not all guide_IDs in whitelist are unique.")
+
     whitelist = whitelist.to_dict(orient='records')
-    return whitelist
+    whitelist_dict = {}
+    for guide in whitelist:
+        whitelist_dict[guide['guide_ID']] = guide
+
+    return whitelist_dict
 
 def process_sensor_structure(sensor_structure_file):
     """
@@ -164,6 +209,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
+    """ Pre-processing whitelist and configuration. """
     logger.info(f"Reading sensor structure from {args.sensor_structure}")
     sensor_structure = process_sensor_structure(args.sensor_structure)
     sensor_structure['sensor-left-flank-length'] = 10
@@ -172,16 +218,29 @@ if __name__ == "__main__":
     logger.info(f"Reading whitelist from {args.whitelist}")
     whitelist = process_whitelist(args.whitelist)
 
+    """ Constructing sgRNA matcher object. """
     logger.info(f"Constructing sgRNA matcher from whitelist.")
     matcher = ExactMatcher(whitelist)
 
+    """ Matching reads to guides in whitelist. """
     matched_reads = []
     for fastq_file in args.fastq:
         logger.info(f"Matching reads in {fastq_file} to guides in whitelist...")
         matches = match_fastq(sensor_structure, matcher, fastq_file)
-        matched_reads.append(matches)
+        matched_reads += matches
 
-    print(matched_reads)
-    
-    
+    guides_to_reads = defaultdict(list)
+    for matched_read in matched_reads:
+        if matched_read['match'] is None: 
+            continue
+        guides_to_reads[matched_read['match']].append(matched_read['read'])
+
+    """ Quantifying editing outcomes. """
+    guides_to_outcomes = {}
+    for guide, matched_reads in guides_to_reads.items():
+        editing_outcomes = quantify_guide_editing(whitelist[guide], matched_reads)
+        guides_to_outcomes[guide] = editing_outcomes
+
+    print(guides_to_outcomes)
+
 
