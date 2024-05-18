@@ -74,7 +74,7 @@ def parse_read(sensor_structure, read):
         "genomic_sensor": read[genomic_sensor_start:genomic_sensor_end]
     }
 
-def match_fastq(sensor_structure, matcher, fastq_file):
+def match_fastq(sensor_structure, matcher, fastq_file, progress=10000):
     """
     Matches all reads from a FASTq file with the matcher,
     using the specified sensor structure configuration.
@@ -85,7 +85,11 @@ def match_fastq(sensor_structure, matcher, fastq_file):
 
     matched_reads = []
     with open(fastq_file, 'r') as fastq:
+        counter = 0
         while True:
+            if counter % progress == 0:
+                logger.info(f"Processed {counter} reads from {fastq_file}.")
+
             try: 
                 header, raw_read, sense, qc = next(fastq), next(fastq), next(fastq), next(fastq) # process 4 lines at a time
                 read = parse_read(sensor_structure, raw_read)
@@ -99,6 +103,8 @@ def match_fastq(sensor_structure, matcher, fastq_file):
                 })
             except StopIteration:
                 break
+
+            counter += 1
 
     return matched_reads
 
@@ -137,8 +143,58 @@ def quantify_guide_editing(guide, matched_reads):
             outcomes['edits'][edit] += 1
 
     outcomes['total_edits'] = len(matched_reads) - outcomes['non_edits']
-
     return outcomes
+
+def postprocess_outcomes(whitelist, guides_to_outcomes, base, targeted=True):
+    columns = [
+        "guide_ID", "sequence", "PAM", "exPAM", "edit_position", 
+        "surrounding nucleotide context (NNCNN)", "total",
+        f"t{base}AN", f"t{base}CN",  f"t{base}GN", f"t{base}TN", 
+        f"t{base}A",  f"t{base}C",  f"t{base}G",  f"t{base}T",  
+        "tINDEL"
+    ]
+
+    def count_edit(edits, src, dst, target, isolated):
+        count = 0
+        for edit in edits:
+            if src != edit[0] or dst != edit[1] or (target is not None and target != edit[3]):
+                continue
+            if not isolated:
+                count += edits[edit]
+                continue
+            if edit[2] == 1:
+                count += edits[edit]
+                continue
+        return count
+
+    rows = []
+    for guide_id, outcomes in guides_to_outcomes.items():
+        guide = whitelist[guide_id]
+        target   = guide['target_position'] if targeted else None
+        sequence = guide['sgRNA']
+        surrounding_context = guide['sgRNA'][target - 2:target + 3] if target else None
+
+        edits = outcomes['edits']
+        tAN = count_edit(edits, base, 'A', target, False) if base != 'A' else None
+        tCN = count_edit(edits, base, 'C', target, False) if base != 'C' else None
+        tGN = count_edit(edits, base, 'G', target, False) if base != 'G' else None
+        tTN = count_edit(edits, base, 'T', target, False) if base != 'T' else None
+        tA  = count_edit(edits, base, 'A', target, True)  if base != 'A' else None
+        tC  = count_edit(edits, base, 'C', target, True)  if base != 'C' else None
+        tG  = count_edit(edits, base, 'G', target, True)  if base != 'G' else None
+        tT  = count_edit(edits, base, 'T', target, True)  if base != 'A' else None
+        tINDEL = outcomes['indels']
+        total = outcomes['total_edits']
+
+        row =  [
+            guide_id, sequence, guide['PAM'], None, target,
+            surrounding_context, total, tAN, tCN, tGN, tTN, 
+            tA, tC, tG, tT, tINDEL
+        ]
+
+        rows.append(dict(zip(columns, row)))
+
+    return pd.DataFrame(rows)
 
 def process_whitelist(whitelist_file):
     """
@@ -195,7 +251,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        '-f', '--format', type=str, choices=['target', 'all', 'json'], default='target',
+        '-f', '--format', type=str, choices=['target', 'all'], default='target',
         help='Path to fastq file containing the sequencing reads.'
     )
 
@@ -226,7 +282,7 @@ if __name__ == "__main__":
     matched_reads = []
     for fastq_file in args.fastq:
         logger.info(f"Matching reads in {fastq_file} to guides in whitelist...")
-        matches = match_fastq(sensor_structure, matcher, fastq_file)
+        matches = match_fastq(sensor_structure, matcher, fastq_file, progress=50000)
         matched_reads += matches
 
     guides_to_reads = defaultdict(list)
@@ -236,11 +292,21 @@ if __name__ == "__main__":
         guides_to_reads[matched_read['match']].append(matched_read['read'])
 
     """ Quantifying editing outcomes. """
+    logger.info(f"Quantifying editing outcomes...")
     guides_to_outcomes = {}
     for guide, matched_reads in guides_to_reads.items():
         editing_outcomes = quantify_guide_editing(whitelist[guide], matched_reads)
         guides_to_outcomes[guide] = editing_outcomes
 
-    print(guides_to_outcomes)
+    """ Formatting editing outcomes. """
+    logger.info(f"Formatting editing outcomes...")
+    if args.format == 'target':
+        result_df = postprocess_outcomes(whitelist, guides_to_outcomes, args.base, True)
+        print(result_df)
+        result_df.to_csv(args.output)
+    else:
+        result_df = postprocess_outcomes(whitelist, guides_to_outcomes, args.base, False)
+        print(result_df)
+        result_df.to_csv(args.output)
 
-
+    logger.info(f"Processing complete.")
