@@ -182,7 +182,7 @@ def postprocess_outcomes(whitelist, guides_to_outcomes, base, targeted=True):
         tA  = count_edit(edits, base, 'A', target, True)  if base != 'A' else None
         tC  = count_edit(edits, base, 'C', target, True)  if base != 'C' else None
         tG  = count_edit(edits, base, 'G', target, True)  if base != 'G' else None
-        tT  = count_edit(edits, base, 'T', target, True)  if base != 'A' else None
+        tT  = count_edit(edits, base, 'T', target, True)  if base != 'T' else None
         tINDEL = outcomes['indels']
         total = outcomes['total_edits']
 
