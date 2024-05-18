@@ -1,4 +1,5 @@
 import argparse
+import random
 import sys
 import os
 import json
@@ -41,6 +42,73 @@ class ExactMatcher(Matcher):
             return self.whitelist_dictionary[sgRNA]['guide_ID']
 
         return None
+
+class ProbabilisticMatcher(Matcher):
+    """
+    A probabilistic matching algorithm, parameterized by three
+    variables:
+    - n: the length of the sequence to be matched against
+    - m <= n: the number of positions to select
+    - k: the number of random hash functions to construct
+    The complexity of the matcher grows *linearly* in k, the
+    number of hash functions.
+    """
+
+    def __init__(self, whitelist, seed, n, m, k):
+        self.whitelist = whitelist
+        self.n = n
+        self.m = m
+        self.k = k
+
+        indices = list(range(n))
+
+        random.seed(seed)
+        self.random_hash_functions = []
+        for _ in range(k):
+            positions = random.sample(indices, m) # randomly select m of n positions to use for hashing
+            self.random_hash_functions.append(positions)
+
+        self.tables = []
+        for idx in range(len(self.random_hash_functions)):
+            table = defaultdict(list)
+            for guide in self.whitelist.values():
+                key = self.random_hash(idx, guide['sgRNA'])
+                table[key].append(guide)
+            self.tables.append(table)
+
+    def random_hash(self, idx, s):
+        positions = self.random_hash_functions[idx]
+        return hash(''.join(s[p] for p in positions))
+
+    def match(self, sgRNA):
+        if len(sgRNA) != self.n:
+            return None
+
+        def hd(s1, s2):
+            return sum(s1[i] != s2[i] for i in range(len(s1)))
+
+        candidates = []
+        for i in range(len(self.tables)):
+            key = self.random_hash(i, sgRNA)
+            if key in self.tables[i]:
+                candidates += self.tables[i][key]
+
+        if not candidates:
+            return None
+
+        closest_candidate, dist = None, -1
+        for candidate in candidates:
+            if closest_candidate is None:
+                dist = hd(sgRNA, candidate['sgRNA']) 
+                closest_candidate = candidate
+                continue
+
+            candidate_dist = hd(sgRNA, candidate['sgRNA']) 
+            if candidate_dist < dist:
+                dist = candidate_dist
+                closest_candidate = candidate
+
+        return closest_candidate['guide_ID']
 
 def parse_read(sensor_structure, read):
     """
@@ -146,6 +214,11 @@ def quantify_guide_editing(guide, matched_reads):
     return outcomes
 
 def postprocess_outcomes(whitelist, guides_to_outcomes, base, targeted=True):
+    """
+    Post-processes the outcomes, formatting them into an easy to 
+    understand Pandas dataframe.
+    """
+
     columns = [
         "guide_ID", "sequence", "PAM", "exPAM", "edit_position", 
         "surrounding nucleotide context (NNCNN)", "total",
@@ -260,6 +333,11 @@ def parse_args():
         help='Base to quantify.'
     )
 
+    parser.add_argument(
+        '-m', '--matcher', type=str, choices=['exact', 'probabilistic'], default='exact',
+        help='Type of matching algorithm.'
+    )
+
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -276,7 +354,10 @@ if __name__ == "__main__":
 
     """ Constructing sgRNA matcher object. """
     logger.info(f"Constructing sgRNA matcher from whitelist.")
-    matcher = ExactMatcher(whitelist)
+    if args.matcher == 'exact':
+        matcher = ExactMatcher(whitelist)
+    else:
+        matcher = ProbabilisticMatcher(whitelist, 73, 20, 10, 10)
 
     """ Matching reads to guides in whitelist. """
     matched_reads = []
