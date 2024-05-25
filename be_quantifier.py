@@ -1,84 +1,100 @@
+from Bio import SeqIO
 import argparse
+import csv
+from tqdm import tqdm
 import random
-import sys
-import os
 import json
-
 import pandas as pd
 import numpy as np
-
 from abc import abstractmethod
 from loguru import logger
-from dataclasses import dataclass
 from collections import defaultdict
+import os
+import sys
+
+def filter_fastq(input_fastq, whitelist_file, output_fastq, sensor_structure, filter_length, column_name='sensor_amplicon', debug=False):
+    """
+    Filter sequences from the input FASTQ file based on the list of sequences in the whitelist.
+    Only sequences that contain any of the filter sequences as substrings are retained.
+    """
+
+    # Scaffold to use for finding matching sgRNA to sensor
+    scaffold = sensor_structure['sgrna-right-scaffold']
+
+    filter_sequences = set()
+
+    # Read sequences from the whitelist CSV file
+    with open(whitelist_file, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if column_name in row:
+                full_sequence = row[column_name].strip()
+                if not full_sequence:
+                    # Skip empty sequences
+                    continue
+
+                idx = full_sequence.find(scaffold)
+                if idx == -1:
+                    # Skip sequences that do not contain the sgRNA scaffold
+                    continue
+
+                filter_sequence = full_sequence[idx - filter_length:idx+len(scaffold) + filter_length]
+                filter_sequences.add(filter_sequence)
+            else:
+                print(f"Column '{column_name}' not found in row: {row}")
+
+    # Count total records for progress bar
+    total_records = sum(1 for _ in SeqIO.parse(input_fastq, 'fastq'))
+
+    # Filter the FASTQ file
+    with open(output_fastq, 'w') as out_fh, tqdm(total=total_records, desc="Filtering FASTQ", unit="read") as pbar:
+        for record in SeqIO.parse(input_fastq, 'fastq'):
+            idx = record.seq.find(scaffold)
+            if idx == -1:
+                continue
+
+            filter_match_sequence = record.seq[idx - filter_length:idx+len(scaffold) + filter_length]
+            if filter_match_sequence in filter_sequences:
+                SeqIO.write(record, out_fh, 'fastq')
+
+            pbar.update(1)
 
 class Matcher:
-    """
-    A matcher object provides functionality to take a  (potentially 
-    edited) sgRNA and match it against  a whitelist of sgRNAs. The 
-    matcher object provides the `match` method which returns the ID 
-    of the best  matching sgRNA from the whitelist, if any match 
-    exists.
-    """
-
     @abstractmethod
     def match(self, sgRNA):
         pass
 
 class ExactMatcher(Matcher):
     """
-    An exact matcher, which requires the sgRNA exactly matches a
-    sgRNA in the whitelist.
+    Matcher that performs exact matching of sgRNA sequences against a whitelist.
     """
-
     def __init__(self, whitelist):
         self.whitelist = whitelist
-        self.whitelist_dictionary = {}
-        for guide in self.whitelist.values():
-            self.whitelist_dictionary[guide['sgRNA']] = guide
+        self.whitelist_dictionary = {guide['sgRNA']: guide for guide in self.whitelist.values()}
 
     def match(self, sgRNA):
-        if sgRNA in self.whitelist_dictionary:
-            return self.whitelist_dictionary[sgRNA]['guide_ID']
-
-        return None
+        return self.whitelist_dictionary.get(sgRNA, {}).get('guide_ID')
 
 class ProbabilisticMatcher(Matcher):
     """
-    A probabilistic matching algorithm, parameterized by three
-    variables:
-    - n: the length of the sequence to be matched against
-    - m <= n: the number of positions to select
-    - k: the number of random hash functions to construct
-    The complexity of the matcher grows *linearly* in k, the
-    number of hash functions.
+    Matcher that performs probabilistic matching of sgRNA sequences using random hash functions.
     """
-
     def __init__(self, whitelist, seed, n, m, k):
         self.whitelist = whitelist
         self.n = n
         self.m = m
         self.k = k
-
         indices = list(range(n))
-
         random.seed(seed)
-        self.random_hash_functions = []
-        for _ in range(k):
-            positions = random.sample(indices, m) # randomly select m of n positions to use for hashing
-            self.random_hash_functions.append(positions)
-
-        self.tables = []
-        for idx in range(len(self.random_hash_functions)):
-            table = defaultdict(list)
+        self.random_hash_functions = [random.sample(indices, m) for _ in range(k)]
+        self.tables = [defaultdict(list) for _ in range(len(self.random_hash_functions))]
+        for idx, positions in enumerate(self.random_hash_functions):
             for guide in self.whitelist.values():
                 key = self.random_hash(idx, guide['sgRNA'])
-                table[key].append(guide)
-            self.tables.append(table)
+                self.tables[idx][key].append(guide)
 
     def random_hash(self, idx, s):
-        positions = self.random_hash_functions[idx]
-        return hash(''.join(s[p] for p in positions))
+        return hash(''.join(s[p] for p in self.random_hash_functions[idx]))
 
     def match(self, sgRNA):
         if len(sgRNA) != self.n:
@@ -90,51 +106,34 @@ class ProbabilisticMatcher(Matcher):
         candidates = []
         for i in range(len(self.tables)):
             key = self.random_hash(i, sgRNA)
-            if key in self.tables[i]:
-                candidates += self.tables[i][key]
+            candidates.extend(self.tables[i].get(key, []))
 
         if not candidates:
             return None
 
-        closest_candidate, dist = None, -1
-        for candidate in candidates:
-            if closest_candidate is None:
-                dist = hd(sgRNA, candidate['sgRNA']) 
-                closest_candidate = candidate
-                continue
-
-            candidate_dist = hd(sgRNA, candidate['sgRNA']) 
-            if candidate_dist < dist:
-                dist = candidate_dist
-                closest_candidate = candidate
-
+        closest_candidate, dist = min(((c, hd(sgRNA, c['sgRNA'])) for c in candidates), key=lambda x: x[1])
         return closest_candidate['guide_ID']
 
 def parse_read(sensor_structure, read):
     """
-    Parses a read, extracting the sgRNA and the genomic sensor 
-    within it, returning None if the read is malformed.
+    Parse a read to extract the sgRNA and genomic sensor sequences based on the sensor structure.
     """
-
     sgrna_start = read.find(sensor_structure['sgrna-left-scaffold'])
     if sgrna_start == -1:
         return None
-
     sgrna_start += len(sensor_structure['sgrna-left-scaffold'])
     sgrna_end = read.find(sensor_structure['sgrna-right-scaffold'])
     if sgrna_end == -1:
         return None
 
-    genomic_sensor_start = read.find(sensor_structure['sensor-left-scaffold']) 
+    genomic_sensor_start = read.find(sensor_structure['sensor-left-scaffold'])
     if genomic_sensor_start == -1:
         return None
-
     genomic_sensor_end = read.find(sensor_structure['sensor-right-scaffold'])
     if genomic_sensor_end == -1:
         return None
 
-    genomic_sensor_start += len(sensor_structure['sensor-left-scaffold'])
-    genomic_sensor_start += sensor_structure['sensor-left-flank-length']
+    genomic_sensor_start += len(sensor_structure['sensor-left-scaffold']) + sensor_structure['sensor-left-flank-length']
     genomic_sensor_end -= sensor_structure['sensor-right-flank-length']
 
     return {
@@ -142,28 +141,37 @@ def parse_read(sensor_structure, read):
         "genomic_sensor": read[genomic_sensor_start:genomic_sensor_end]
     }
 
+def extract_sensor_sequence(sensor_structure, sensor_amplicon):
+    """
+    Extract the sensor sequence from the sensor amplicon based on the sensor structure.
+    """
+    genomic_sensor_start = sensor_amplicon.find(sensor_structure['sensor-left-scaffold'])
+    if genomic_sensor_start == -1:
+        return None
+    genomic_sensor_end = sensor_amplicon.find(sensor_structure['sensor-right-scaffold'])
+    if genomic_sensor_end == -1:
+        return None
+
+    genomic_sensor_start += len(sensor_structure['sensor-left-scaffold']) + sensor_structure['sensor-left-flank-length']
+    genomic_sensor_end -= sensor_structure['sensor-right-flank-length']
+
+    return sensor_amplicon[genomic_sensor_start:genomic_sensor_end]
+
 def match_fastq(sensor_structure, matcher, fastq_file, progress=10000):
     """
-    Matches all reads from a FASTq file with the matcher,
-    using the specified sensor structure configuration.
-
-    Returns a list mapping each read to its corresponding 
-    guide, if such a guide exists.
+    Match reads from the FASTQ file to guides in the whitelist and extract relevant sequences.
     """
-
     matched_reads = []
     with open(fastq_file, 'r') as fastq:
         counter = 0
         while True:
             if counter % progress == 0:
                 logger.info(f"Processed {counter} reads from {fastq_file}.")
-
-            try: 
-                header, raw_read, sense, qc = next(fastq), next(fastq), next(fastq), next(fastq) # process 4 lines at a time
+            try:
+                header, raw_read, sense, qc = next(fastq), next(fastq), next(fastq), next(fastq)
                 read = parse_read(sensor_structure, raw_read)
                 if read is None:
                     continue
-
                 match = matcher.match(read['sgrna'])
                 matched_reads.append({
                     "read": read,
@@ -171,171 +179,195 @@ def match_fastq(sensor_structure, matcher, fastq_file, progress=10000):
                 })
             except StopIteration:
                 break
-
             counter += 1
-
     return matched_reads
 
-def quantify_guide_editing(guide, matched_reads):
+def quantify_guide_editing(guide, matched_reads, sensor_structure, base, format_type):
     """
-    Quantifies the editing outcomes for all reads
-    matching the guide. Returns a dictionary counting
-    the different type of edits.
+    Quantify the editing outcomes for a guide based on the matched reads.
     """
-
     def hd(s1, s2):
         return sum(s1[i] != s2[i] for i in range(len(s1)))
 
-    sgrna = guide['sgRNA']
+    sensor_amplicon = extract_sensor_sequence(sensor_structure, guide['sensor_amplicon'])
+    if sensor_amplicon is None:
+        raise ValueError("Unable to extract sensor sequence from sensor_amplicon.")
 
-    outcomes = {
-        'non_edits': 0,
-        'indels': 0,
-        'edits': defaultdict(int)
-    }
+    target_position = guide['target_position'] if format_type == 'target' else None
+
+    outcomes = defaultdict(lambda: defaultdict(int))
+    non_edit_count = 0
+    indel_count = 0
 
     for read in matched_reads:
         genomic_sensor = read['genomic_sensor']
-        if len(genomic_sensor) != len(sgrna):
-            outcomes['indels'] += 1
+        if len(genomic_sensor) != len(sensor_amplicon):
+            indel_count += 1
             continue
 
-        hamming_distance = hd(sgrna, genomic_sensor)
+        hamming_distance = hd(sensor_amplicon, genomic_sensor)
         if hamming_distance == 0:
-            outcomes['non_edits'] += 1
+            non_edit_count += 1
             continue
 
-        for i in range(len(sgrna)):
-            if sgrna[i] == genomic_sensor[i]: continue
-            edit = (sgrna[i], genomic_sensor[i], hamming_distance, i) # (from, to, hamming-distance, position)
-            outcomes['edits'][edit] += 1
+        single_edit = hamming_distance == 1
 
-    outcomes['total_edits'] = len(matched_reads) - outcomes['non_edits']
+        for i in range(len(sensor_amplicon)):
+            if format_type == 'target' and i != target_position:
+                continue
+
+            if sensor_amplicon[i] == base:
+                if genomic_sensor[i] == 'A':
+                    outcomes[i]['A'] += 1
+                    if single_edit:
+                        outcomes[i]['A_single'] += 1
+                elif genomic_sensor[i] == 'C':
+                    outcomes[i]['C'] += 1
+                    if single_edit:
+                        outcomes[i]['C_single'] += 1
+                elif genomic_sensor[i] == 'G':
+                    outcomes[i]['G'] += 1
+                    if single_edit:
+                        outcomes[i]['G_single'] += 1
+                elif genomic_sensor[i] == 'T':
+                    outcomes[i]['T'] += 1
+                    if single_edit:
+                        outcomes[i]['T_single'] += 1
+
+    total_reads = len(matched_reads)
+    total_minus_indels = total_reads - indel_count
+    outcomes['total_reads'] = total_reads
+    outcomes['total_minus_indels'] = total_minus_indels
+    outcomes['non_edits'] = non_edit_count
+    outcomes['indels'] = indel_count
+
     return outcomes
 
-def postprocess_outcomes(whitelist, guides_to_outcomes, base, targeted=True):
+def postprocess_outcomes(whitelist, guides_to_outcomes, sensor_structure, base, format_type):
     """
-    Post-processes the outcomes, formatting them into an easy to 
-    understand Pandas dataframe.
+    Post-process the quantified editing outcomes and format them into a DataFrame.
     """
-
     columns = [
-        "guide_ID", "sequence", "PAM", "exPAM", "edit_position", 
-        "surrounding nucleotide context (NNCNN)", "total",
-        f"t{base}AN", f"t{base}CN",  f"t{base}GN", f"t{base}TN", 
-        f"t{base}A",  f"t{base}C",  f"t{base}G",  f"t{base}T",  
-        "tINDEL"
+        "guide_ID", "sequence", "PAM", "edit_position", 
+        "total_reads", "total_minus_indels", "non_edits", "indels"
     ]
-
-    def count_edit(edits, src, dst, target, isolated):
-        count = 0
-        for edit in edits:
-            if src != edit[0] or dst != edit[1] or (target is not None and target != edit[3]):
-                continue
-            if not isolated:
-                count += edits[edit]
-                continue
-            if edit[2] == 1:
-                count += edits[edit]
-                continue
-        return count
 
     rows = []
     for guide_id, outcomes in guides_to_outcomes.items():
         guide = whitelist[guide_id]
-        target   = guide['target_position'] if targeted else None
         sequence = guide['sgRNA']
-        surrounding_context = guide['sgRNA'][target - 2:target + 3] if target else None
+        pam = guide['PAM']
+        total_reads = outcomes['total_reads']
+        total_minus_indels = outcomes['total_minus_indels']
+        non_edits = outcomes['non_edits']
+        indels = outcomes['indels']
 
-        edits = outcomes['edits']
-        tAN = count_edit(edits, base, 'A', target, False) if base != 'A' else None
-        tCN = count_edit(edits, base, 'C', target, False) if base != 'C' else None
-        tGN = count_edit(edits, base, 'G', target, False) if base != 'G' else None
-        tTN = count_edit(edits, base, 'T', target, False) if base != 'T' else None
-        tA  = count_edit(edits, base, 'A', target, True)  if base != 'A' else None
-        tC  = count_edit(edits, base, 'C', target, True)  if base != 'C' else None
-        tG  = count_edit(edits, base, 'G', target, True)  if base != 'G' else None
-        tT  = count_edit(edits, base, 'T', target, True)  if base != 'T' else None
-        tINDEL = outcomes['indels']
-        total = outcomes['total_edits']
+        sensor_amplicon = extract_sensor_sequence(sensor_structure, guide['sensor_amplicon'])
+        if sensor_amplicon is None:
+            raise ValueError("Unable to extract sensor sequence from sensor_amplicon.")
 
-        row =  [
-            guide_id, sequence, guide['PAM'], None, target,
-            surrounding_context, total, tAN, tCN, tGN, tTN, 
-            tA, tC, tG, tT, tINDEL
-        ]
+        for position in range(len(sensor_amplicon)):
+            if format_type == 'target' and position != guide['target_position']:
+                continue
 
-        rows.append(dict(zip(columns, row)))
+            if sensor_amplicon[position] == base:
+                row = {
+                    "guide_ID": guide_id,
+                    "sequence": sequence,
+                    "PAM": pam,
+                    "edit_position": position,
+                    "total_reads": total_reads,
+                    "total_minus_indels": total_minus_indels,
+                    "non_edits": non_edits,
+                    "indels": indels,
+                    f"t{base}AN": outcomes[position]['A'],
+                    f"t{base}CN": outcomes[position]['C'],
+                    f"t{base}GN": outcomes[position]['G'],
+                    f"t{base}TN": outcomes[position]['T'],
+                    f"t{base}A_single": outcomes[position]['A_single'],
+                    f"t{base}C_single": outcomes[position]['C_single'],
+                    f"t{base}G_single": outcomes[position]['G_single'],
+                    f"t{base}T_single": outcomes[position]['T_single']
+                }
+                rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    columns_to_drop = [col for col in df.columns if any(col.startswith(f"t{base}{base}N") or col.startswith(f"t{base}{base}_single") for base in "ACGT")]
+    filtered_columns = [col for col in df.columns if col not in columns_to_drop]
+    df = df[filtered_columns]
+
+    return df
 
 def process_whitelist(whitelist_file):
     """
-    Reads the whitelist and returns a dictionary mapping guide IDs
-    to the guide, where each guide is represented as a dictionary.
+    Process the whitelist CSV file and return it as a dictionary.
     """
-
     whitelist = pd.read_csv(whitelist_file)
-    whitelist =  whitelist[['guide_ID', 'sgRNA', 'target_position', 'PAM',]]
+    whitelist = whitelist[['guide_ID', 'sgRNA', 'target_position', 'PAM', 'sensor_amplicon']]
     if not all(~whitelist['guide_ID'].duplicated()):
         raise Exception("Not all guide_IDs in whitelist are unique.")
-
     whitelist = whitelist.to_dict(orient='records')
-    whitelist_dict = {}
-    for guide in whitelist:
-        whitelist_dict[guide['guide_ID']] = guide
-
+    whitelist_dict = {guide['guide_ID']: guide for guide in whitelist}
     return whitelist_dict
 
 def process_sensor_structure(sensor_structure_file):
     """
-    Reads the sensor structure file and returns a dictionary 
-    containing the sensor structure.
+    Process the sensor structure JSON file and return it as a dictionary.
     """
-
     with open(sensor_structure_file, 'r') as f:
         sensor_structure = json.load(f)
-
     return sensor_structure
 
 def parse_args():
+    """
+    Parse command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description='Quantifies the editing outcomes from a base editing sensor screen.'
     )
 
     parser.add_argument(
-        'whitelist', type=str,
-        help='Path to the whitelist (CSV) containing guides to quantify.'
+        '-i', '--input_fastq', type=str, required=True,
+        help='Path to the input FASTQ file containing the sequencing reads.'
     )
-
     parser.add_argument(
-        'sensor_structure', type=str,
+        '-w', '--whitelist', type=str, required=True,
+        help='CSV file containing the list of sequences to keep and guides to quantify.'
+    )
+    parser.add_argument(
+        '-o', '--output_fastq', type=str, required=True,
+        help='Path to the output filtered FASTQ file.'
+    )
+    parser.add_argument(
+        '-s', '--sensor_structure', type=str, required=True,
         help='Path to JSON file describing sensor structure.'
     )
-
     parser.add_argument(
-        'fastq', type=str, nargs='+',
-        help='Path to FASTq files containing the sequencing reads.'
+        '-q', '--quant_output', type=str, default='analysis.csv',
+        help='Path to output file for quantified editing outcomes (default: analysis.csv).'
     )
-
     parser.add_argument(
-        '-o', '--output', type=str, default='analysis.csv',
-        help='Path to output file.'
+        '-c', '--column_name', type=str, default='sensor_amplicon',
+        help='Column name in the CSV file containing sequences (default: sensor_amplicon).'
     )
-
+    parser.add_argument(
+        '--filter_length', type=int, default=5,
+        help='Length of the filter around the scaffold (default: 5).'
+    )
     parser.add_argument(
         '-f', '--format', type=str, choices=['target', 'all'], default='target',
-        help='Path to fastq file containing the sequencing reads.'
+        help='Format for the output: "target" for specific target positions, "all" for all positions.'
     )
-
     parser.add_argument(
         '-b', '--base', type=str, default='A', choices=['A', 'C', 'G', 'T'],
         help='Base to quantify.'
     )
-
     parser.add_argument(
-        '-m', '--matcher', type=str, choices=['exact', 'probabilistic'], default='exact',
+        '-m', '--matcher', type=str, choices=['exact', 'probabilistic'], default='probabilistic',
         help='Type of matching algorithm.'
+    )
+    parser.add_argument(
+        '-d', '--debug', action='store_true', help='Enable debugging output'
     )
 
     return parser.parse_args()
@@ -343,51 +375,53 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    """ Pre-processing whitelist and configuration. """
+    # Check if input FASTQ file exists
+    if not os.path.isfile(args.input_fastq):
+        print(f"Error: Input FASTQ file '{args.input_fastq}' not found.")
+        sys.exit(1)
+
+    # Step 1: Read sensor structure and whitelist
     logger.info(f"Reading sensor structure from {args.sensor_structure}")
     sensor_structure = process_sensor_structure(args.sensor_structure)
     sensor_structure['sensor-left-flank-length'] = 10
     sensor_structure['sensor-right-flank-length'] = 13
 
+    # Step 2: Filter the FASTQ file
+    logger.info(f"Filtering FASTQ file {args.input_fastq} using sequences from {args.whitelist}")
+    filter_fastq(args.input_fastq, args.whitelist, args.output_fastq, sensor_structure, args.filter_length, args.column_name, args.debug)
+
     logger.info(f"Reading whitelist from {args.whitelist}")
     whitelist = process_whitelist(args.whitelist)
 
-    """ Constructing sgRNA matcher object. """
     logger.info(f"Constructing sgRNA matcher from whitelist.")
     if args.matcher == 'exact':
         matcher = ExactMatcher(whitelist)
     else:
-        matcher = ProbabilisticMatcher(whitelist, 73, 20, 10, 10)
+        matcher = ProbabilisticMatcher(whitelist, 73, 20, 7, 20)
 
-    """ Matching reads to guides in whitelist. """
-    matched_reads = []
-    for fastq_file in args.fastq:
-        logger.info(f"Matching reads in {fastq_file} to guides in whitelist...")
-        matches = match_fastq(sensor_structure, matcher, fastq_file, progress=50000)
-        matched_reads += matches
+    # Step 3: Match reads to guides in the filtered FASTQ file
+    logger.info(f"Matching reads in {args.output_fastq} to guides in whitelist...")
+    matched_reads = match_fastq(sensor_structure, matcher, args.output_fastq, progress=50000)
 
     guides_to_reads = defaultdict(list)
     for matched_read in matched_reads:
-        if matched_read['match'] is None: 
+        if matched_read['match'] is None:
             continue
         guides_to_reads[matched_read['match']].append(matched_read['read'])
 
-    """ Quantifying editing outcomes. """
+    # Step 4: Quantify editing outcomes
     logger.info(f"Quantifying editing outcomes...")
     guides_to_outcomes = {}
     for guide, matched_reads in guides_to_reads.items():
-        editing_outcomes = quantify_guide_editing(whitelist[guide], matched_reads)
+        editing_outcomes = quantify_guide_editing(whitelist[guide], matched_reads, sensor_structure, args.base, args.format)
         guides_to_outcomes[guide] = editing_outcomes
 
-    """ Formatting editing outcomes. """
+    # Step 5: Postprocess and save the outcomes
     logger.info(f"Formatting editing outcomes...")
-    if args.format == 'target':
-        result_df = postprocess_outcomes(whitelist, guides_to_outcomes, args.base, True)
-        print(result_df)
-        result_df.to_csv(args.output)
-    else:
-        result_df = postprocess_outcomes(whitelist, guides_to_outcomes, args.base, False)
-        print(result_df)
-        result_df.to_csv(args.output)
+    result_df = postprocess_outcomes(whitelist, guides_to_outcomes, sensor_structure, args.base, args.format)
+
+    print(result_df)
+    result_df.to_csv(args.quant_output, index=False)
 
     logger.info(f"Processing complete.")
+
