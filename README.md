@@ -1,26 +1,18 @@
-# Processing Sensor Outcomes
+# bequant
 
-This script processes raw data from a **sensor based** base editing
-screen into a mapping from sgRNAs to editing outcomes. In particular,
-the script uses raw, paired-end read data to classify the editing
-events that resulted in the observed target sites. It is assumes that 
-the sensor screen has the following structure: 
+`bequant` processes raw data from a sensor based base editing
+screen into a mapping from sgRNAs to editing outcomes. 
+`bequant` uses raw, paired-end read data to classify the editing
+events that resulted in the observed target sites. Complete details 
+describing the method can be found at:
 ```
-left-scaffold --- sgrna --- middle-scaffold --- target-site --- right-scaffold 
-``` 
-and that the sgRNA region remains unedited during the screen. 
-Reads with edited sgRNA regions are thrown out as errors.
-
-## Script execution
-
-To run the script, first compile the program with `lein` using
-```
-lein with-profile prod uberjar
 ```
 
-Then, run the following command to analyze the raw read data.
+## usage
+
+To use `bequant` simply execute:
 ```
-$ java -jar analysis.jar 
+$ python bequant.py --help
 Usage: java -jar analyze-fastqs rep1 ... repN [options]
 
 Options:
@@ -33,3 +25,17 @@ Options:
 Expects FASTq files consisting of the paired end reads
 for each replicate.
 ```
+
+## example
+
+As an example, we will use `bequant` to process a subset of data
+in an mKRAS tiling screen of cells treated with Adagrasib. To apply
+`bequant` to this example, run the following command:
+
+```
+$ python bequant.py -w example/mKras_whitelist.csv -i example/R1_D10_MRTX849_full.fastq \
+                    -s example/mKras_scaffold.json -o example/R1_D10_MRTX849_full.processed.fast \
+                    -q example/R1_D10_MRTX849_full_quantification.csv
+```
+
+Output files...
