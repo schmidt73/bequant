@@ -1,8 +1,0 @@
-{
-  "sgrna-left-scaffold": "CACC",
-  "sgrna-right-scaffold": "GTTTAAGAGCTATGCTGGAAACAGCATAGCAAGTTTAAATAAGGCTAGTCCGTTATCAACTTGAAAAAGTGGCACCGAGTCGGTGCTTTTTTT",
-  "sensor-left-scaffold": "AAAAAGTGGCACCGAGTCGGTGCTTTTTTT",
-  "sensor-right-scaffold": "GCATGAATTC",
-  "target-start": 135,
-  "target-end": 175
-}
